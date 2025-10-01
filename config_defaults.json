@@ -1,0 +1,11 @@
+{
+  "next_button_xpaths": [
+    "//div[@role='button' and .//span[normalize-space(text())='Next' or normalize-space(text())='다음']]",
+    "//*[@id='layers']/div/div/div/div/div/div/div[2]/div[2]/div/div/div[2]/div[2]/div/div/div/button[2]"
+  ],
+  "login_button_xpaths": [
+    "//div[@role='button' and .//span[normalize-space(text())='Log in' or normalize-space(text())='로그인']]",
+    "//*[@id='layers']/div/div/div/div/div/div/div[2]/div[2]/div/div/div[2]/div[2]/div[2]/div/div[1]/div/div/button"
+  ],
+  "article_xpath_template": "//a[contains(@href,'/status/{tweet_id}')]/ancestor::article"
+}
