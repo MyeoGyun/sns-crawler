@@ -343,7 +343,8 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None):
     scrolls = 0
     no_new = 0
 
-    print("[정보] 스크롤 시작...")
+    print("[정보] 스크롤 및 데이터 수집 시작...")
+    print("=" * 60)
 
     while True:
         try:
@@ -359,29 +360,57 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None):
                 all_tweets.append(tweet)
                 new += 1
 
+                # 각 트윗 추출 시 즉시 로그 출력
+                text_preview = tweet["text"][:50] + "..." if len(tweet["text"]) > 50 else tweet["text"]
+                print(f"[수집 #{len(all_tweets):3d}] {tweet['author_handle']:20s} | {text_preview}")
+
+                # 미디어 정보 표시
+                if tweet["has_media"] == "TRUE":
+                    media_count = len(tweet["media_urls"].split(", "))
+                    print(f"              └─ 미디어 {media_count}개 포함")
+
+        # 스크롤 정보 표시
+        scrolls += 1
+        scroll_info = f"[스크롤 #{scrolls:2d}]"
+        if max_scrolls:
+            scroll_info += f" ({scrolls}/{max_scrolls})"
+
         if new > 0:
-            print(f"  → {len(all_tweets)}개 추출")
+            print(f"\n{scroll_info} 이번 스크롤에서 {new}개 신규 추출 (총 {len(all_tweets)}개)")
+        else:
+            print(f"\n{scroll_info} 신규 데이터 없음 (중복 또는 끝)")
+            no_new += 1
 
         if new == 0:
-            no_new += 1
             if no_new >= 3:
+                print("[정보] 연속 3회 신규 데이터 없음 - 수집 종료")
                 break
         else:
             no_new = 0
 
+        # 스크롤 실행
         last_h = driver.execute_script("return document.body.scrollHeight")
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
+
+        # 스크롤 대기
+        if scrolls < 3:
+            print(f"[대기] 페이지 로딩 중... ({SCROLL_PAUSE}초)")
         time.sleep(SCROLL_PAUSE)
 
         new_h = driver.execute_script("return document.body.scrollHeight")
         if new_h == last_h:
+            print("[정보] 페이지 끝 도달 - 수집 종료")
             break
 
-        scrolls += 1
         if max_scrolls and scrolls >= max_scrolls:
+            print(f"[정보] 최대 스크롤 횟수 ({max_scrolls}회) 도달 - 수집 종료")
             break
 
-    print(f"\n[완료] 총 {len(all_tweets)}개 추출")
+        print("=" * 60)
+
+    print("\n" + "=" * 60)
+    print(f"[완료] 총 {len(all_tweets)}개 인용글 수집 완료")
+    print("=" * 60)
     return all_tweets
 
 # -----------------------
