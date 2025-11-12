@@ -41,6 +41,11 @@ captures/
 *.csv
 config.json
 
+# Session and Cookies (SECURITY - DO NOT COMMIT!)
+.env
+.session/
+credentials.json
+
 # Temporary files
 *.tmp
 *.log
