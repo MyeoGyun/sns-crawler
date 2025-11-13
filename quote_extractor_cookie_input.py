@@ -9,6 +9,7 @@ import os
 import time
 import csv
 import getpass
+import random
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
@@ -26,9 +27,26 @@ except ImportError:
 # 설정값
 # -----------------------
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
-SCROLL_PAUSE = 2.0
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.path.join(BASE_DIR, ".env")
+
+# -----------------------
+# 랜덤 딜레이 헬퍼 함수
+# -----------------------
+def random_delay(min_sec=8, max_sec=12, description=""):
+    """
+    랜덤한 지연 시간을 생성하여 봇 감지를 회피합니다.
+
+    Args:
+        min_sec: 최소 대기 시간 (초)
+        max_sec: 최대 대기 시간 (초)
+        description: 대기 이유 설명
+    """
+    delay = random.uniform(min_sec, max_sec)
+    if description:
+        print(f"[대기] {description} ({delay:.1f}초)")
+    time.sleep(delay)
+    return delay
 
 # -----------------------
 # 쿠키 입력받기
@@ -165,7 +183,7 @@ def load_cookies_to_driver(driver, cookies):
         # Twitter 홈페이지로 먼저 이동 (쿠키 도메인 일치 필요)
         print("[정보] Twitter 접속 중...")
         driver.get("https://x.com")
-        time.sleep(2)
+        random_delay(3, 6, "페이지 초기 로딩")
 
         print("[정보] 쿠키 로드 중...")
 
@@ -207,7 +225,7 @@ def load_cookies_to_driver(driver, cookies):
         # 쿠키 적용 확인
         print("[정보] 세션 검증 중...")
         driver.get("https://x.com/home")
-        time.sleep(3)
+        random_delay(5, 8, "로그인 세션 검증")
 
         # 로그인 상태 확인
         if is_logged_in(driver):
@@ -284,6 +302,7 @@ def parse_quote_tweet(article):
             "hashtags": "", "time_iso_utc": "", "has_media": "",
             "media_urls": "", "is_quote": "FALSE",
             "quote_status_id": "인용X", "quote_time_iso_utc": "인용X",
+            "reply_count": "0", "retweet_count": "0", "like_count": "0",
         }
 
         # status_id 및 url
@@ -325,6 +344,46 @@ def parse_quote_tweet(article):
             data["has_media"] = "FALSE"
             data["media_urls"] = "인용X"
 
+        # reply_count, retweet_count, like_count 추출
+        try:
+            # 댓글 수
+            reply_btn = article.find_element(By.CSS_SELECTOR, "button[data-testid='reply']")
+            reply_aria = reply_btn.get_attribute("aria-label") or ""
+            # aria-label 예: "Reply. 10 replies" or "Reply"
+            reply_parts = reply_aria.split()
+            for part in reply_parts:
+                if part.isdigit():
+                    data["reply_count"] = part
+                    break
+        except:
+            pass
+
+        try:
+            # 리트윗 수
+            retweet_btn = article.find_element(By.CSS_SELECTOR, "button[data-testid='retweet']")
+            retweet_aria = retweet_btn.get_attribute("aria-label") or ""
+            # aria-label 예: "Repost. 50 reposts" or "Repost"
+            retweet_parts = retweet_aria.split()
+            for part in retweet_parts:
+                if part.isdigit():
+                    data["retweet_count"] = part
+                    break
+        except:
+            pass
+
+        try:
+            # 좋아요 수
+            like_btn = article.find_element(By.CSS_SELECTOR, "button[data-testid='like']")
+            like_aria = like_btn.get_attribute("aria-label") or ""
+            # aria-label 예: "Like. 100 likes" or "Like"
+            like_parts = like_aria.split()
+            for part in like_parts:
+                if part.isdigit():
+                    data["like_count"] = part
+                    break
+        except:
+            pass
+
         return data
     except:
         return None
@@ -336,7 +395,7 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None):
     """인용글 추출"""
     print(f"\n[정보] 인용글 페이지 접근...")
     driver.get(quotes_url)
-    time.sleep(3)
+    random_delay(5, 8, "인용글 페이지 로딩")
 
     all_tweets = []
     seen_ids = set()
@@ -392,10 +451,8 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None):
         last_h = driver.execute_script("return document.body.scrollHeight")
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
 
-        # 스크롤 대기
-        if scrolls < 3:
-            print(f"[대기] 페이지 로딩 중... ({SCROLL_PAUSE}초)")
-        time.sleep(SCROLL_PAUSE)
+        # 스크롤 대기 (랜덤 딜레이로 봇 감지 회피 및 네트워크 로딩 여유)
+        random_delay(8, 12, "페이지 스크롤 후 로딩")
 
         new_h = driver.execute_script("return document.body.scrollHeight")
         if new_h == last_h:
@@ -422,15 +479,29 @@ def save_to_csv(tweets, output_path):
         print("[경고] 저장할 데이터 없음")
         return
 
-    fieldnames = ["status_id", "url", "author_handle", "text", "hashtags",
-                  "time_iso_utc", "has_media", "media_urls", "is_quote",
-                  "quote_status_id", "quote_time_iso_utc"]
+    # 요청된 컬럼 순서: "등록일자", "게시물번호", "좋아요수", "리트윗수", "댓글수",
+    #                  "내용", "해시태그", "게시물URL", "작성자URL", "작성자아이디"
+    fieldnames = ["등록일자", "게시물번호", "좋아요수", "리트윗수", "댓글수",
+                  "내용", "해시태그", "게시물URL", "작성자URL", "작성자아이디"]
 
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for tweet in tweets:
-            writer.writerow(tweet)
+            # 기존 필드명을 새 필드명으로 매핑
+            mapped_tweet = {
+                "등록일자": tweet.get("time_iso_utc", ""),
+                "게시물번호": tweet.get("status_id", ""),
+                "좋아요수": tweet.get("like_count", "0"),
+                "리트윗수": tweet.get("retweet_count", "0"),
+                "댓글수": tweet.get("reply_count", "0"),
+                "내용": tweet.get("text", ""),
+                "해시태그": tweet.get("hashtags", ""),
+                "게시물URL": tweet.get("url", ""),
+                "작성자URL": tweet.get("url", "").rsplit("/status/", 1)[0] if tweet.get("url") else "",
+                "작성자아이디": tweet.get("author_handle", ""),
+            }
+            writer.writerow(mapped_tweet)
 
     print(f"\n[완료] CSV 저장: {output_path}")
     print(f"  - 총 {len(tweets)}개 레코드")

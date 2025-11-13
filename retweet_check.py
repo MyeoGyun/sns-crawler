@@ -1,4 +1,5 @@
-# twitter_rt_gui_with_login.py
+# social_media_verification_tool.py
+# 트위터 리트윗 검증 + 인스타그램 댓글 검증 통합 도구
 # 실행 전: pip install selenium pillow
 # Chrome & chromedriver 버전 일치 필요
 # Mac/Windows 양쪽에서 동작하도록 설계됨
@@ -22,10 +23,8 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 from selenium.common.exceptions import (
-    NoSuchElementException, TimeoutException, WebDriverException
+    NoSuchElementException, TimeoutException
 )
-
-from selenium.webdriver.common.keys import Keys
 
 from PIL import Image, ImageTk
 
@@ -35,9 +34,9 @@ from PIL import Image, ImageTk
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 SCROLL_PAUSE = 2.0
 # 사용자 간 기본 대기 시간(초)
-DEFAULT_USER_DELAY = 4.0
+DEFAULT_USER_DELAY = 10.0
 # 타임라인 로딩 대기 범위(초)
-TIMELINE_WAIT_RANGE = (3.0, 6.0)
+TIMELINE_WAIT_RANGE = (10.0, 13.0)
 # None: 스크롤 제한 없이 콘텐츠 끝까지 탐색
 MAX_SCROLLS_PER_PROFILE = None
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
@@ -105,6 +104,9 @@ def make_driver(headless=True, user_data_dir=None):
     opts.add_argument("--no-sandbox")
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1200,2000")
+    # 라이트 모드 강제 설정
+    opts.add_argument("--force-dark-mode=0")
+    opts.add_experimental_option("prefs", {"profile.default_content_setting_values.prefers_color_scheme": 1})
     # 사용자 프로필을 재사용하고 싶다면 user_data_dir 인자에 경로를 넣어 재로그인 방지 가능
     if user_data_dir:
         opts.add_argument(f"--user-data-dir={user_data_dir}")
@@ -113,131 +115,93 @@ def make_driver(headless=True, user_data_dir=None):
     return driver
 
 # -----------------------
-# 로그인 처리 (일반적 흐름: username -> next -> password)
-# UI 변경될 수 있으니 요소 탐색은 신중히)
+# 수동 로그인 대기 처리
 # -----------------------
-def login_twitter(driver, login_id, login_pw, wait_sec=10):
+def wait_for_manual_login(driver, wait_sec=300, platform="twitter"):
     """
-    로그인 시도:
-    - twitter.com/login 페이지 열고 username 입력 -> next 버튼 -> password 입력 -> 로그인
-    - 로그인 완료 여부는 URL 변화를 통해 확인
+    사용자가 수동으로 로그인할 때까지 대기:
+    - 플랫폼 로그인 페이지를 열어 사용자가 직접 로그인하도록 함
+    - 로그인 완료 여부는 URL 변화와 홈 페이지 요소를 통해 확인
+    - 최대 wait_sec 동안 대기 (기본 5분)
     반환: True/False
     """
-    driver.get("https://twitter.com/i/flow/login")
+    if platform == "instagram":
+        driver.get("https://www.instagram.com/accounts/login/")
+        time.sleep(2)
+        messagebox.showinfo(
+            "수동 로그인 필요",
+            "브라우저 창에서 직접 Instagram에 로그인해주세요.\n로그인이 완료되면 자동으로 진행됩니다.\n\n(최대 5분 대기)"
+        )
+    else:
+        # twitter.com은 x.com으로 자동 리디렉션됨
+        driver.get("https://twitter.com/i/flow/login")
+        time.sleep(2)  # 페이지 로드 대기
+        messagebox.showinfo(
+            "수동 로그인 필요",
+            "브라우저 창에서 직접 X(Twitter)에 로그인해주세요.\n로그인이 완료되면 자동으로 진행됩니다.\n\n(최대 5분 대기)"
+        )
 
     try:
-        # 1) 아이디 입력 필드 대기 후 입력
-        el_id = WebDriverWait(driver, wait_sec).until(
-            EC.presence_of_element_located((By.NAME, "text"))
-        )
-        el_id.clear()
-        el_id.send_keys(login_id)
-
-        next_button_xpaths = SELECTOR_CONFIG.get("next_button_xpaths") or [
-            "//div[@role='button' and .//span[normalize-space(text())='Next' or normalize-space(text())='다음']]",
-            "//*[@id='layers']/div/div/div/div/div/div/div[2]/div[2]/div/div/div[2]/div[2]/div/div/div/button[2]",
-        ]
-
-        def click_next_button():
-            last_error = None
-            for xpath in next_button_xpaths:
-                try:
-                    next_btn = WebDriverWait(driver, wait_sec).until(
-                        EC.element_to_be_clickable((By.XPATH, xpath))
-                    )
-                    next_btn.click()
-                    time.sleep(0.2)
-                    return
-                except TimeoutException as exc:
-                    last_error = exc
-            if last_error:
-                raise last_error
-
-        # 2) Next 버튼 클릭 (대기 후 실행)
-        try:
-            click_next_button()
-        except TimeoutException:
-            # 일부 계정은 Next 단계 없이 바로 password 입력으로 넘어감
-            pass
-
-        # 3) 비밀번호 입력 필드 대기 후 입력(추가 확인 단계 대응)
-        pw_input = None
-        for _ in range(3):
-            try:
-                pw_input = WebDriverWait(driver, wait_sec).until(
-                    EC.presence_of_element_located((By.NAME, "password"))
-                )
-                break
-            except TimeoutException:
-                try:
-                    alt_input = WebDriverWait(driver, wait_sec).until(
-                        EC.presence_of_element_located((By.NAME, "text"))
-                    )
-                    alt_input.clear()
-                    alt_input.send_keys(login_id)
+        if platform == "instagram":
+            # 인스타그램 로그인 확인
+            def has_instagram_login(drv):
+                current_url = drv.current_url
+                # 로그인 페이지가 아니면 성공
+                if "/accounts/login" not in current_url:
+                    # 추가 확인: 주요 요소 존재
                     try:
-                        click_next_button()
-                    except TimeoutException:
-                        alt_input.send_keys(Keys.RETURN)
-                except TimeoutException:
-                    raise
+                        # 네비게이션 바나 프로필 링크 확인
+                        elements = drv.find_elements(By.CSS_SELECTOR, 'a[href*="/accounts/edit"]')
+                        if elements:
+                            return True
+                        # URL이 instagram.com이고 로그인 페이지가 아니면
+                        if "instagram.com" in current_url and "/accounts" not in current_url:
+                            return True
+                    except:
+                        pass
+                return False
 
-        if pw_input is None:
-            raise TimeoutException("Password input not found after additional prompts")
-        pw_input.clear()
-        pw_input.send_keys(login_pw)
+            WebDriverWait(driver, wait_sec).until(has_instagram_login)
+            time.sleep(2)
+            return True
+        else:
+            # 트위터 로그인 확인
+            home_fragments = ("/home", "twitter.com/?", "x.com/?")
+            nav_locators = [
+                (By.CSS_SELECTOR, '[data-testid="AppTabBar_Home_Link"]'),
+                (By.CSS_SELECTOR, '[data-testid="SideNav_AccountSwitcher_Button"]'),
+                (By.CSS_SELECTOR, '[data-testid="primaryColumn"]'),
+                (By.CSS_SELECTOR, '[aria-label="Home"]'),
+            ]
 
-        # 4) 로그인 버튼 클릭
-        login_button_xpaths = SELECTOR_CONFIG.get("login_button_xpaths") or [
-            "//div[@role='button' and .//span[normalize-space(text())='Log in' or normalize-space(text())='로그인']]",
-            "//*[@id='layers']/div/div/div/div/div/div/div[2]/div[2]/div/div/div[2]/div[2]/div[2]/div/div[1]/div/div/button",
-        ]
+            def has_home_signal(drv):
+                """로그인 완료 감지 - URL 체크 및 홈 요소 확인"""
+                current_url = drv.current_url
 
-        try:
-            last_error = None
-            for xpath in login_button_xpaths:
-                try:
-                    login_btn = WebDriverWait(driver, wait_sec).until(
-                        EC.element_to_be_clickable((By.XPATH, xpath))
-                    )
-                    login_btn.click()
-                    break
-                except TimeoutException as exc:
-                    last_error = exc
-            else:
-                if last_error:
-                    raise last_error
-        except TimeoutException:
-            # fallback: 엔터로 제출
-            pw_input.submit()
-
-        # 5) 로그인 성공 확인 (홈 URL/홈 UI 신호 감지)
-        home_fragments = ("twitter.com/home", "x.com/home", "twitter.com/?", "x.com/?")
-        nav_locators = [
-            (By.CSS_SELECTOR, '[data-testid="AppTabBar_Home_Link"]'),
-            (By.CSS_SELECTOR, '[data-testid="SideNav_AccountSwitcher_Button"]'),
-        ]
-
-        conditions = [EC.url_contains(fragment) for fragment in home_fragments]
-        conditions.extend(EC.presence_of_element_located(locator) for locator in nav_locators)
-
-        def has_home_signal(drv):
-            if any(fragment in drv.current_url for fragment in home_fragments):
-                return True
-            for locator in nav_locators:
-                try:
-                    if drv.find_element(*locator).is_displayed():
+                # URL 기반 체크
+                if any(fragment in current_url for fragment in home_fragments):
+                    # 추가로 페이지 요소 확인
+                    for locator in nav_locators:
+                        try:
+                            element = drv.find_element(*locator)
+                            if element.is_displayed():
+                                return True
+                        except NoSuchElementException:
+                            continue
+                    # URL이 홈이면 요소가 없어도 True
+                    if "/home" in current_url:
                         return True
-                except NoSuchElementException:
-                    continue
-            return False
 
-        try:
-            WebDriverWait(driver, wait_sec * 2).until(EC.any_of(*conditions))
-        except AttributeError:
-            WebDriverWait(driver, wait_sec * 2).until(has_home_signal)
-        return True
+                return False
 
+            # 5분 동안 로그인 완료 대기
+            WebDriverWait(driver, wait_sec).until(has_home_signal)
+            time.sleep(2)  # 페이지 완전히 로드 대기
+            return True
+
+    except TimeoutException:
+        messagebox.showerror("로그인 시간 초과", "5분 내에 로그인을 완료하지 못했습니다.")
+        return False
     except Exception as e:
         raise RuntimeError("login_error") from e
 
@@ -360,12 +324,165 @@ def check_profile_and_capture(driver, username, tweet_id, capture_dir, max_scrol
     return found, capture_path
 
 # -----------------------
+# 인스타그램 댓글 검증 관련 함수들
+# -----------------------
+def check_instagram_comment_and_capture(driver, post_url, username, capture_dir):
+    """
+    인스타그램 게시글에서 특정 사용자의 댓글을 찾고 캡처 (강화된 로직)
+    """
+    username = username.lstrip("@").strip()
+    found = False
+    capture_path = ""
+
+    try:
+        driver.get(post_url)
+    except Exception:
+        messagebox.showerror("게시글 오류", f"게시글을 불러오지 못했습니다: {post_url}")
+        return False, ""
+
+    # 페이지 로딩 대기
+    time.sleep(random.uniform(4.0, 6.0))
+
+    try:
+        # 1단계: 댓글 섹션 찾기 및 확장
+        print(f"[{username}] 댓글 섹션 로딩 중...")
+
+        # 댓글 더보기 버튼 클릭 (여러 번 시도)
+        for attempt in range(8):
+            try:
+                # 다양한 "댓글 더보기" 버튼 셀렉터
+                load_more_selectors = [
+                    "//span[contains(text(), '댓글') and contains(text(), '모두 보기')]",
+                    "//button[contains(text(), 'View all')]",
+                    "//span[contains(text(), 'View all')]//parent::button",
+                    "//div[@role='button']//span[contains(text(), 'comment')]",
+                ]
+
+                clicked = False
+                for selector in load_more_selectors:
+                    try:
+                        buttons = driver.find_elements(By.XPATH, selector)
+                        for btn in buttons:
+                            if btn.is_displayed():
+                                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                                time.sleep(0.5)
+                                btn.click()
+                                time.sleep(1.5)
+                                clicked = True
+                                print(f"[{username}] 댓글 더보기 클릭 ({attempt + 1})")
+                                break
+                        if clicked:
+                            break
+                    except:
+                        continue
+
+                if not clicked:
+                    # 더 이상 버튼이 없으면 스크롤
+                    driver.execute_script("window.scrollBy(0, 300);")
+                    time.sleep(1.0)
+            except:
+                pass
+
+        # 2단계: 사용자 검색 (다양한 방법)
+        print(f"[{username}] 사용자 검색 중...")
+
+        # 방법 1: 프로필 링크로 검색 (가장 확실함)
+        profile_link_selectors = [
+            f"//a[@href='/{username}/']",
+            f"//a[contains(@href, '/{username}/')]",
+            f"//a[@href='/{username}' or @href='/{username}/']",
+        ]
+
+        comment_element = None
+        for selector in profile_link_selectors:
+            try:
+                links = driver.find_elements(By.XPATH, selector)
+                print(f"[{username}] 프로필 링크 {len(links)}개 발견")
+
+                for link in links:
+                    try:
+                        # 링크가 댓글 영역 내에 있는지 확인
+                        # 부모 요소를 올라가면서 댓글 컨테이너 찾기
+                        parent_selectors = [
+                            "./ancestor::ul//li",  # 댓글 목록의 li
+                            "./ancestor::div[@role='button']",  # 버튼 역할의 div
+                            "./ancestor::article//div[contains(@style, 'padding')]",  # article 내 패딩 div
+                        ]
+
+                        for parent_sel in parent_selectors:
+                            try:
+                                container = link.find_element(By.XPATH, parent_sel)
+                                # 댓글 텍스트가 있는지 확인
+                                if container.text and len(container.text) > len(username):
+                                    comment_element = container
+                                    found = True
+                                    print(f"[{username}] ✓ 댓글 발견! (방법: {parent_sel})")
+                                    break
+                            except:
+                                continue
+
+                        if found:
+                            break
+                    except:
+                        continue
+
+                if found:
+                    break
+            except:
+                continue
+
+        # 방법 2: 페이지 소스에서 직접 검색 (fallback)
+        if not found:
+            page_source = driver.page_source
+            if f'"{username}"' in page_source or f"'{username}'" in page_source or f"/{username}/" in page_source:
+                print(f"[{username}] 페이지 소스에서 발견 (전체 페이지 캡처)")
+                found = True
+                fname = f"instagram_{username}_full_page.png"
+                save_path = os.path.join(capture_dir, fname)
+                driver.save_screenshot(save_path)
+                capture_path = save_path
+
+        # 3단계: 댓글 캡처
+        if found and comment_element:
+            fname = f"instagram_{username}_comment.png"
+            save_path = os.path.join(capture_dir, fname)
+
+            # 댓글을 화면 중앙으로 스크롤
+            driver.execute_script("arguments[0].scrollIntoView({block: 'center', inline: 'nearest'});", comment_element)
+            time.sleep(1.5)
+
+            # 캡처 시도
+            if save_element_screenshot(driver, comment_element, save_path):
+                capture_path = save_path
+                print(f"[{username}] ✓ 댓글 캡처 완료: {save_path}")
+            else:
+                # fallback: 전체 페이지
+                fname = f"instagram_{username}_fallback.png"
+                save_path = os.path.join(capture_dir, fname)
+                driver.save_screenshot(save_path)
+                capture_path = save_path
+                print(f"[{username}] ⚠ fallback 캡처: {save_path}")
+
+    except Exception as e:
+        print(f"[{username}] Error: {e}")
+        # 에러 발생 시에도 페이지 캡처 시도
+        try:
+            fname = f"instagram_{username}_error.png"
+            save_path = os.path.join(capture_dir, fname)
+            driver.save_screenshot(save_path)
+            capture_path = save_path
+        except:
+            pass
+
+    return found, capture_path
+
+# -----------------------
 # 백그라운드 스레드로 검사 진행 (GUI 블로킹 방지)
 # -----------------------
 def run_check_thread(tweet_id, usernames, login_id, login_pw, headless, tree, btn_run, btn_save, capture_dir, per_user_delay, progress_bar, progress_var, status_var=None):
     btn_run.config(state="disabled")
     btn_save.config(state="disabled")
-    # 드라이버 생성 및 로그인
+    # 드라이버 생성 및 수동 로그인 대기
     driver = None
     try:
         driver = make_driver(headless=headless)
@@ -380,7 +497,7 @@ def run_check_thread(tweet_id, usernames, login_id, login_pw, headless, tree, bt
         return
 
     try:
-        login_ok = login_twitter(driver, login_id, login_pw)
+        login_ok = wait_for_manual_login(driver)
     except RuntimeError:
         driver.quit()
         messagebox.showerror("로그인 오류", "로그인 중 오류가 발생했습니다. 개발자에게 문의해주세요.")
@@ -395,7 +512,7 @@ def run_check_thread(tweet_id, usernames, login_id, login_pw, headless, tree, bt
     if not login_ok:
         # 로그인 실패 시 드라이버 닫고 상태 복원
         driver.quit()
-        messagebox.showerror("로그인 실패", "로그인에 실패했습니다. 아이디/비밀번호를 확인하거나 개발자에게 문의해주세요.")
+        messagebox.showerror("로그인 실패", "로그인에 실패했습니다. 다시 시도해주세요.")
         btn_run.config(state="normal")
         btn_save.config(state="disabled")
         if progress_var is not None:
@@ -444,12 +561,89 @@ def run_check_thread(tweet_id, usernames, login_id, login_pw, headless, tree, bt
         tqdm_bar.close()
     messagebox.showinfo("완료", "검사가 완료됨. 결과를 저장하세요.")
 
+# 인스타그램 댓글 검사 스레드
+def run_instagram_check_thread(post_url, usernames, headless, tree, btn_run, btn_save, capture_dir, per_user_delay, progress_bar, progress_var, status_var=None):
+    btn_run.config(state="disabled")
+    btn_save.config(state="disabled")
+    driver = None
+
+    try:
+        driver = make_driver(headless=headless)
+    except Exception:
+        messagebox.showerror("드라이버 오류", "ChromeDriver 실행 중 오류가 발생했습니다.")
+        btn_run.config(state="normal")
+        btn_save.config(state="disabled")
+        if progress_var is not None:
+            progress_var.set(0)
+        if status_var is not None:
+            status_var.set("드라이버 오류")
+        return
+
+    try:
+        login_ok = wait_for_manual_login(driver, platform="instagram")
+    except RuntimeError:
+        driver.quit()
+        messagebox.showerror("로그인 오류", "인스타그램 로그인 중 오류가 발생했습니다.")
+        btn_run.config(state="normal")
+        btn_save.config(state="disabled")
+        if progress_var is not None:
+            progress_var.set(0)
+        if status_var is not None:
+            status_var.set("로그인 오류")
+        return
+
+    if not login_ok:
+        driver.quit()
+        messagebox.showerror("로그인 실패", "인스타그램 로그인에 실패했습니다.")
+        btn_run.config(state="normal")
+        btn_save.config(state="disabled")
+        if progress_var is not None:
+            progress_var.set(0)
+        if status_var is not None:
+            status_var.set("로그인 실패")
+        return
+
+    # 테이블 초기화
+    for row in tree.get_children():
+        tree.delete(row)
+
+    total = len(usernames)
+    if progress_bar is not None and progress_var is not None:
+        progress_bar.configure(maximum=max(total, 1))
+        progress_var.set(0)
+
+    for idx, user in enumerate(usernames):
+        delay = max(per_user_delay, 0)
+        if idx > 0:
+            time.sleep(random.uniform(delay, delay + 2.5))
+
+        found, capture = check_instagram_comment_and_capture(driver, post_url, user, capture_dir)
+        tree.insert("", "end", values=(
+            user,
+            "YES" if found else "NO",
+            capture if capture else "",
+        ))
+
+        if status_var is not None:
+            status_var.set(f"검사 중... ({idx + 1}/{total})")
+        if progress_var is not None:
+            progress_var.set(idx + 1)
+
+    driver.quit()
+    btn_save.config(state="normal")
+    btn_run.config(state="normal")
+    if status_var is not None:
+        status_var.set("검사 완료")
+    if progress_var is not None:
+        progress_var.set(total)
+    messagebox.showinfo("완료", "인스타그램 댓글 검사가 완료되었습니다.")
+
 # -----------------------
 # GUI 구성
 # -----------------------
 def build_gui():
     root = tk.Tk()
-    root.title("트위터 RT 검증 도구")
+    root.title("소셜미디어 검증 도구")
 
     if os.path.isfile(ICON_PATH):
         try:
@@ -499,15 +693,30 @@ def build_gui():
     main.columnconfigure(1, weight=2)
     main.rowconfigure(5, weight=1)
 
-    header = ttk.Label(main, text="트위터 RT 검증 도구", style="Header.TLabel")
+    header = ttk.Label(main, text="소셜미디어 검증 도구", style="Header.TLabel")
     header.grid(row=0, column=0, columnspan=2, sticky="w")
 
-    subheader = ttk.Label(
-        main,
-        text="이벤트 트윗 리트윗 여부를 빠르게 확인하고 캡처까지 저장하세요.",
-        style="Subheader.TLabel",
-    )
-    subheader.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 16))
+    # 모드 선택 프레임
+    mode_frame = ttk.Frame(main, style="Main.TFrame")
+    mode_frame.grid(row=1, column=0, columnspan=2, sticky="w", pady=(4, 16))
+
+    mode_var = tk.StringVar(value="twitter")
+
+    ttk.Radiobutton(
+        mode_frame,
+        text="트위터 리트윗 검증",
+        variable=mode_var,
+        value="twitter",
+        style="Secondary.TButton"
+    ).pack(side="left", padx=(0, 10))
+
+    ttk.Radiobutton(
+        mode_frame,
+        text="인스타그램 댓글 검증",
+        variable=mode_var,
+        value="instagram",
+        style="Secondary.TButton"
+    ).pack(side="left")
 
     event_frame = ttk.Frame(main, style="Main.TFrame")
     event_frame.grid(row=2, column=0, sticky="nsew", padx=(0, 12))
@@ -525,12 +734,14 @@ def build_gui():
         widget.bind("<Button-3>", show)
         widget.bind("<Button-2>", show)
 
-    ttk.Label(event_frame, text="이벤트 트윗 ID", style="Subheader.TLabel").grid(row=0, column=0, sticky="w", pady=(0, 6))
+    label_event_id = ttk.Label(event_frame, text="이벤트 트윗 ID / 인스타 게시글 URL", style="Subheader.TLabel")
+    label_event_id.grid(row=0, column=0, sticky="w", pady=(0, 6))
     entry_tweet = ttk.Entry(event_frame)
     entry_tweet.grid(row=0, column=1, sticky="ew", pady=(0, 6))
     attach_paste_menu(entry_tweet)
 
-    ttk.Label(event_frame, text="당첨자 목록 (쉼표 구분)", style="Subheader.TLabel").grid(row=1, column=0, sticky="nw")
+    label_users = ttk.Label(event_frame, text="당첨자 목록 (쉼표 구분)", style="Subheader.TLabel")
+    label_users.grid(row=1, column=0, sticky="nw")
     text_users = tk.Text(event_frame, width=40, height=5, wrap="word", relief="flat", borderwidth=0)
     text_users.grid(row=1, column=1, sticky="nsew")
     text_users.configure(bg="#f5f5f5", fg="#222222", highlightbackground="#a0a0a0", highlightthickness=1, insertbackground="#222222")
@@ -566,19 +777,18 @@ def build_gui():
     login_frame.grid(row=2, column=1, sticky="nsew")
     login_frame.columnconfigure(1, weight=1)
 
-    ttk.Label(login_frame, text="트위터 로그인 ID", style="Subheader.TLabel").grid(row=0, column=0, sticky="w")
-    entry_id = ttk.Entry(login_frame)
-    entry_id.grid(row=0, column=1, sticky="ew", pady=(0, 6))
-    attach_paste_menu(entry_id)
+    # 수동 로그인 안내 메시지
+    login_info = ttk.Label(
+        login_frame,
+        text="※ 검사 시작 후 브라우저 창에서\n직접 트위터에 로그인해주세요.",
+        style="Subheader.TLabel",
+        justify="left"
+    )
+    login_info.grid(row=0, column=0, columnspan=2, sticky="w", pady=(0, 12))
 
-    ttk.Label(login_frame, text="트위터 비밀번호", style="Subheader.TLabel").grid(row=1, column=0, sticky="w")
-    entry_pw = ttk.Entry(login_frame, show="*")
-    entry_pw.grid(row=1, column=1, sticky="ew", pady=(0, 6))
-    attach_paste_menu(entry_pw)
-
-    headless_var = tk.BooleanVar(value=True)
-    chk_headless = ttk.Checkbutton(login_frame, text="헤드리스 실행 (창 숨김)", variable=headless_var)
-    chk_headless.grid(row=2, column=0, columnspan=2, sticky="w", pady=(6, 0))
+    headless_var = tk.BooleanVar(value=False)
+    chk_headless = ttk.Checkbutton(login_frame, text="헤드리스 실행 (창 숨김) - 수동 로그인시 비활성화 권장", variable=headless_var)
+    chk_headless.grid(row=1, column=0, columnspan=2, sticky="w", pady=(6, 0))
 
     action_frame = ttk.Frame(main, style="Main.TFrame")
     action_frame.grid(row=3, column=0, columnspan=2, sticky="ew", pady=(18, 12))
@@ -596,19 +806,9 @@ def build_gui():
         frame_inner = ttk.Frame(dialog, padding=16)
         frame_inner.pack(fill="both", expand=True)
 
-        ttk.Label(frame_inner, text="Next 버튼 XPath (줄마다 1개)", style="Subheader.TLabel").grid(row=0, column=0, sticky="w")
-        txt_next = tk.Text(frame_inner, width=80, height=4, relief="flat", borderwidth=1)
-        txt_next.grid(row=1, column=0, sticky="ew", pady=(2, 12))
-        txt_next.insert("1.0", "\n".join(SELECTOR_CONFIG.get("next_button_xpaths", [])))
-
-        ttk.Label(frame_inner, text="로그인 버튼 XPath (줄마다 1개)", style="Subheader.TLabel").grid(row=2, column=0, sticky="w")
-        txt_login = tk.Text(frame_inner, width=80, height=4, relief="flat", borderwidth=1)
-        txt_login.grid(row=3, column=0, sticky="ew", pady=(2, 12))
-        txt_login.insert("1.0", "\n".join(SELECTOR_CONFIG.get("login_button_xpaths", [])))
-
-        ttk.Label(frame_inner, text="트윗 Article XPath 템플릿", style="Subheader.TLabel").grid(row=4, column=0, sticky="w")
+        ttk.Label(frame_inner, text="트윗 Article XPath 템플릿", style="Subheader.TLabel").grid(row=0, column=0, sticky="w")
         entry_article = ttk.Entry(frame_inner, width=80)
-        entry_article.grid(row=5, column=0, sticky="ew", pady=(2, 12))
+        entry_article.grid(row=1, column=0, sticky="ew", pady=(2, 12))
         entry_article.insert(0, SELECTOR_CONFIG.get(
             "article_xpath_template",
             "//a[contains(@href,'/status/{tweet_id}')]/ancestor::article",
@@ -619,36 +819,30 @@ def build_gui():
             text="{tweet_id} 부분은 자동으로 이벤트 트윗 ID로 치환됩니다.",
             style="Subheader.TLabel",
         )
-        info_lbl.grid(row=6, column=0, sticky="w", pady=(0, 12))
+        info_lbl.grid(row=2, column=0, sticky="w", pady=(0, 12))
 
         btn_row = ttk.Frame(frame_inner)
-        btn_row.grid(row=7, column=0, sticky="ew")
+        btn_row.grid(row=3, column=0, sticky="ew")
         btn_row.columnconfigure(0, weight=1)
 
         def refresh_fields():
-            txt_next.delete("1.0", tk.END)
-            txt_login.delete("1.0", tk.END)
             entry_article.delete(0, tk.END)
-            txt_next.insert("1.0", "\n".join(SELECTOR_CONFIG.get("next_button_xpaths", [])))
-            txt_login.insert("1.0", "\n".join(SELECTOR_CONFIG.get("login_button_xpaths", [])))
             entry_article.insert(0, SELECTOR_CONFIG.get(
                 "article_xpath_template",
                 "//a[contains(@href,'/status/{tweet_id}')]/ancestor::article",
             ))
 
         def handle_save():
-            new_next = [line.strip() for line in txt_next.get("1.0", tk.END).splitlines() if line.strip()]
-            new_login = [line.strip() for line in txt_login.get("1.0", tk.END).splitlines() if line.strip()]
             new_article = entry_article.get().strip()
 
-            if not new_next or not new_login or not new_article:
-                messagebox.showerror("입력 오류", "모든 XPath 필드를 올바르게 입력해 주세요.")
+            if not new_article:
+                messagebox.showerror("입력 오류", "XPath 필드를 올바르게 입력해 주세요.")
                 return
 
             global SELECTOR_CONFIG
             SELECTOR_CONFIG = {
-                "next_button_xpaths": new_next,
-                "login_button_xpaths": new_login,
+                "next_button_xpaths": SELECTOR_CONFIG.get("next_button_xpaths", []),
+                "login_button_xpaths": SELECTOR_CONFIG.get("login_button_xpaths", []),
                 "article_xpath_template": new_article,
             }
             save_user_config(SELECTOR_CONFIG)
@@ -694,7 +888,7 @@ def build_gui():
         height=12,
     )
     tree.heading("username", text="사용자")
-    tree.heading("retweeted", text="RT 여부")
+    tree.heading("retweeted", text="발견 여부")
     tree.heading("capture_path", text="캡처 파일 경로")
     tree.column("username", width=220)
     tree.column("retweeted", width=90, anchor="center")
@@ -734,23 +928,25 @@ def build_gui():
     btn_save.config(command=save_csv_action)
 
     def on_run_click():
-        tweet_id = entry_tweet.get().strip()
+        mode = mode_var.get()
+        event_input = entry_tweet.get().strip()
         users_raw = text_users.get("1.0", tk.END).strip()
-        login_id = entry_id.get().strip()
-        login_pw = entry_pw.get().strip()
         headless = headless_var.get()
         capture_dir = capture_dir_var.get().strip() or DEFAULT_CAPTURE_DIR
         delay_input = delay_var.get().strip() or str(DEFAULT_USER_DELAY)
 
-        if not tweet_id or not users_raw or not login_id or not login_pw:
-            messagebox.showerror("입력 오류", "모든 필수 항목(트윗 ID, 사용자 목록, 로그인 정보)을 입력해 주세요.")
+        if not event_input or not users_raw:
+            if mode == "twitter":
+                messagebox.showerror("입력 오류", "트윗 ID와 사용자 목록을 입력해 주세요.")
+            else:
+                messagebox.showerror("입력 오류", "게시글 URL과 사용자 목록을 입력해 주세요.")
             return
 
         if not os.path.isdir(capture_dir):
             try:
                 os.makedirs(capture_dir, exist_ok=True)
             except Exception:
-                messagebox.showerror("폴더 오류", "캡처 저장 폴더를 생성할 수 없습니다. 다른 경로를 선택하거나 개발자에게 문의해주세요.")
+                messagebox.showerror("폴더 오류", "캡처 저장 폴더를 생성할 수 없습니다.")
                 return
 
         try:
@@ -763,32 +959,51 @@ def build_gui():
 
         usernames = [x.strip() for x in users_raw.split(",") if x.strip()]
         if not usernames:
-            messagebox.showerror("입력 오류", "당첨자 목록에 최소 한 명 이상 입력해 주세요.")
+            messagebox.showerror("입력 오류", "사용자 목록에 최소 한 명 이상 입력해 주세요.")
             return
 
         progress_var.set(0)
         progress_bar.configure(maximum=len(usernames))
         status_var.set(f"검사 중... (총 {len(usernames)}명)")
 
-        t = threading.Thread(
-            target=run_check_thread,
-            args=(
-                tweet_id,
-                usernames,
-                login_id,
-                login_pw,
-                headless,
-                tree,
-                btn_run,
-                btn_save,
-                capture_dir,
-                per_user_delay,
-                progress_bar,
-                progress_var,
-                status_var,
-            ),
-            daemon=True,
-        )
+        if mode == "twitter":
+            t = threading.Thread(
+                target=run_check_thread,
+                args=(
+                    event_input,  # tweet_id
+                    usernames,
+                    None,  # login_id (사용 안함)
+                    None,  # login_pw (사용 안함)
+                    headless,
+                    tree,
+                    btn_run,
+                    btn_save,
+                    capture_dir,
+                    per_user_delay,
+                    progress_bar,
+                    progress_var,
+                    status_var,
+                ),
+                daemon=True,
+            )
+        else:  # instagram
+            t = threading.Thread(
+                target=run_instagram_check_thread,
+                args=(
+                    event_input,  # post_url
+                    usernames,
+                    headless,
+                    tree,
+                    btn_run,
+                    btn_save,
+                    capture_dir,
+                    per_user_delay,
+                    progress_bar,
+                    progress_var,
+                    status_var,
+                ),
+                daemon=True,
+            )
         t.start()
 
     btn_run.config(command=on_run_click)
