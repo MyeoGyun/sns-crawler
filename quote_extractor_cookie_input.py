@@ -551,9 +551,11 @@ def parse_quote_tweet(article, driver=None, screenshot_dir="screenshots"):
                 screenshot_filename = f"@스크린샷_tweet_{data['status_id']}.png"
                 screenshot_path = os.path.join(screenshot_dir, screenshot_filename)
 
-                # article 요소가 화면에 완전히 보이도록 스크롤
-                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", article)
-                time.sleep(0.3)  # 스크롤 안정화 대기
+                # article 요소가 화면에 보이도록 부드럽게 스크롤 (메인 스크롤 방해 최소화)
+                driver.execute_script("""
+                    arguments[0].scrollIntoView({block: 'nearest', behavior: 'smooth'});
+                """, article)
+                time.sleep(0.2)  # 스크롤 안정화 대기
 
                 # article 요소 스크린샷 (상하단이 잘리지 않도록)
                 article.screenshot(screenshot_path)
@@ -565,7 +567,14 @@ def parse_quote_tweet(article, driver=None, screenshot_dir="screenshots"):
                 data["screenshot_path"] = ""
 
         return data
-    except:
+    except Exception as e:
+        # 파싱 실패 로깅 (디버깅용)
+        try:
+            status_link = article.find_element(By.CSS_SELECTOR, "a[href*='/status/']")
+            status_url = status_link.get_attribute("href")
+            print(f"  ⚠️  파싱 실패: {status_url} - {str(e)[:50]}")
+        except:
+            print(f"  ⚠️  파싱 실패 (URL 미확인): {str(e)[:50]}")
         return None
 
 # -----------------------
@@ -720,7 +729,7 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None, max_tweets=None, 
         else:
             consecutive_no_dom_change += 1
             print(f"  ⏳ DOM 변화 없음 (연속 {consecutive_no_dom_change}회), 추가 대기 중...")
-            random_delay(5, 8, "DOM 업데이트 대기")
+            random_delay(8, 12, "DOM 업데이트 대기")
 
             # 재확인
             articles_recheck = len(driver.find_elements(By.CSS_SELECTOR, "article[data-testid='tweet']"))
@@ -732,8 +741,8 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None, max_tweets=None, 
                 # 페이지 높이도 확인
                 new_h = driver.execute_script("return document.body.scrollHeight")
                 if new_h == last_h:
-                    # DOM 변화 없음 + 신규 데이터 없음 = 종료 조건
-                    if consecutive_no_dom_change >= 3 and no_new_data >= 3:
+                    # DOM 변화 없음 + 신규 데이터 없음 = 종료 조건 (완화됨)
+                    if consecutive_no_dom_change >= 5 and no_new_data >= 5:
                         print(f"\n  {'─' * 66}")
                         print(f"  🏁 수집 종료 조건 충족")
                         print(f"      • DOM 무변화: {consecutive_no_dom_change}회 연속")
@@ -741,8 +750,8 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None, max_tweets=None, 
                         break
 
                     # DOM만 변화 없고 신규 데이터는 있었다면 조금 더 기다림
-                    if consecutive_no_dom_change >= 5:
-                        print(f"\n  🏁 연속 5회 DOM 변화 없음 - 페이지 끝으로 판단")
+                    if consecutive_no_dom_change >= 7:
+                        print(f"\n  🏁 연속 7회 DOM 변화 없음 - 페이지 끝으로 판단")
                         break
 
         # 🔥 봇 회피: 휴식 시간 체크 (스크롤 후에 체크)
