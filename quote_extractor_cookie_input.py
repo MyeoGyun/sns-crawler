@@ -451,131 +451,177 @@ def make_driver(headless=True):
 # 파싱
 # -----------------------
 def parse_quote_tweet(article, driver=None, screenshot_dir="screenshots"):
-    """트윗 파싱 및 스크린샷 캡처"""
-    try:
-        data = {
-            "status_id": "", "url": "", "author_handle": "", "text": "",
-            "hashtags": "", "time_iso_utc": "", "has_media": "",
-            "media_urls": "", "is_quote": "FALSE",
-            "quote_status_id": "인용X", "quote_time_iso_utc": "인용X",
-            "reply_count": "0", "retweet_count": "0", "like_count": "0",
-            "screenshot_path": "",  # 스크린샷 경로 추가
-        }
+    """
+    트윗 파싱 및 스크린샷 캡처 (독립적 필드 파싱)
+    각 필드를 독립적으로 처리하여 일부 필드 실패해도 나머지 데이터는 수집
+    """
+    data = {
+        "status_id": "", "url": "", "author_handle": "", "text": "",
+        "hashtags": "", "time_iso_utc": "", "has_media": "",
+        "media_urls": "", "is_quote": "FALSE",
+        "quote_status_id": "인용X", "quote_time_iso_utc": "인용X",
+        "reply_count": "0", "retweet_count": "0", "like_count": "0",
+        "screenshot_path": "",
+    }
 
-        # status_id 및 url
-        time_link = article.find_element(By.CSS_SELECTOR, "a[href*='/status/']")
-        href = time_link.get_attribute("href")
-        if href:
+    # 1) status_id 및 url - time 요소의 부모 링크에서 추출 (가장 정확)
+    try:
+        time_element = article.find_element(By.CSS_SELECTOR, "time[datetime]")
+        # time 요소의 부모 a 태그가 이 트윗의 정확한 링크
+        parent_link = time_element.find_element(By.XPATH, "..")
+        href = parent_link.get_attribute("href")
+        if href and "/status/" in href:
             parts = href.split("/status/")
             if len(parts) == 2:
                 status_id = parts[1].split("?")[0]
                 data["status_id"] = status_id
-                data["url"] = f"https://x.com{parts[0].replace('https://x.com', '')}/status/{status_id}"
+                # URL 정규화
+                username_part = parts[0].replace('https://x.com', '').replace('https://twitter.com', '')
+                data["url"] = f"https://x.com{username_part}/status/{status_id}"
+    except Exception as e:
+        # 대안: 일반 status 링크 사용
+        try:
+            time_link = article.find_element(By.CSS_SELECTOR, "a[href*='/status/']")
+            href = time_link.get_attribute("href")
+            if href and "/status/" in href:
+                parts = href.split("/status/")
+                if len(parts) == 2:
+                    status_id = parts[1].split("?")[0]
+                    data["status_id"] = status_id
+                    username_part = parts[0].replace('https://x.com', '').replace('https://twitter.com', '')
+                    data["url"] = f"https://x.com{username_part}/status/{status_id}"
+        except:
+            pass
 
-        # author_handle
+    # status_id가 없으면 이 트윗은 무효
+    if not data["status_id"]:
+        return None
+
+    # 2) author_handle
+    try:
         profile_link = article.find_element(By.CSS_SELECTOR, "a[href^='/'][role='link']")
         profile_href = profile_link.get_attribute("href")
         if profile_href:
             username = profile_href.split("?")[0].split("/")[-1]
             if username and not username.startswith("status"):
-                data["author_handle"] = f"@{username}"
+                data["author_handle"] = f"@{username}" if not username.startswith("@") else username
+    except:
+        # 대안: span 텍스트에서 @ 찾기
+        try:
+            spans = article.find_elements(By.CSS_SELECTOR, "span")
+            for span in spans:
+                text = span.text.strip()
+                if text.startswith("@"):
+                    data["author_handle"] = text
+                    break
+        except:
+            pass
 
-        # text 및 hashtags
+    # 3) text 및 hashtags
+    try:
         tweet_text_div = article.find_element(By.CSS_SELECTOR, "[data-testid='tweetText']")
         data["text"] = tweet_text_div.text.strip()
-        hashtag_links = tweet_text_div.find_elements(By.CSS_SELECTOR, "a[href*='/hashtag/']")
-        hashtags = [link.text.strip() for link in hashtag_links]
-        data["hashtags"] = ", ".join(hashtags)
 
-        # time
+        # 해시태그 추출
+        try:
+            hashtag_links = tweet_text_div.find_elements(By.CSS_SELECTOR, "a[href*='/hashtag/']")
+            hashtags = [link.text.strip() for link in hashtag_links if link.text.strip()]
+            data["hashtags"] = ", ".join(hashtags) if hashtags else ""
+        except:
+            data["hashtags"] = ""
+    except:
+        # 텍스트 없는 트윗도 허용 (이미지 전용 등)
+        data["text"] = ""
+        data["hashtags"] = ""
+
+    # 4) time_iso_utc
+    try:
         time_element = article.find_element(By.CSS_SELECTOR, "time[datetime]")
-        data["time_iso_utc"] = time_element.get_attribute("datetime")
+        datetime_attr = time_element.get_attribute("datetime")
+        if datetime_attr:
+            data["time_iso_utc"] = datetime_attr
+    except:
+        pass
 
-        # media
+    # 5) media (이미지 및 비디오)
+    media_urls = []
+    try:
+        # 이미지
         images = article.find_elements(By.CSS_SELECTOR, "img[src*='pbs.twimg.com']")
-        media_urls = [img.get_attribute("src") for img in images if "profile_images" not in img.get_attribute("src")]
-        if media_urls:
-            data["has_media"] = "TRUE"
-            data["media_urls"] = ", ".join(media_urls)
-        else:
-            data["has_media"] = "FALSE"
-            data["media_urls"] = "인용X"
+        for img in images:
+            src = img.get_attribute("src")
+            if src and "profile_images" not in src:
+                media_urls.append(src)
+    except:
+        pass
 
-        # reply_count, retweet_count, like_count 추출
+    try:
+        # 비디오
+        videos = article.find_elements(By.CSS_SELECTOR, "video source")
+        for video in videos:
+            src = video.get_attribute("src")
+            if src:
+                media_urls.append(src)
+    except:
+        pass
+
+    if media_urls:
+        data["has_media"] = "TRUE"
+        data["media_urls"] = ", ".join(media_urls)
+    else:
+        data["has_media"] = "FALSE"
+        data["media_urls"] = "인용X"
+
+    # 6) reply_count, retweet_count, like_count
+    try:
+        reply_btn = article.find_element(By.CSS_SELECTOR, "button[data-testid='reply']")
+        reply_aria = reply_btn.get_attribute("aria-label") or ""
+        for part in reply_aria.split():
+            if part.isdigit():
+                data["reply_count"] = part
+                break
+    except:
+        pass
+
+    try:
+        retweet_btn = article.find_element(By.CSS_SELECTOR, "button[data-testid='retweet']")
+        retweet_aria = retweet_btn.get_attribute("aria-label") or ""
+        for part in retweet_aria.split():
+            if part.isdigit():
+                data["retweet_count"] = part
+                break
+    except:
+        pass
+
+    try:
+        like_btn = article.find_element(By.CSS_SELECTOR, "button[data-testid='like']")
+        like_aria = like_btn.get_attribute("aria-label") or ""
+        for part in like_aria.split():
+            if part.isdigit():
+                data["like_count"] = part
+                break
+    except:
+        pass
+
+    # 7) 스크린샷 캡처
+    if driver and data["status_id"]:
         try:
-            # 댓글 수
-            reply_btn = article.find_element(By.CSS_SELECTOR, "button[data-testid='reply']")
-            reply_aria = reply_btn.get_attribute("aria-label") or ""
-            # aria-label 예: "Reply. 10 replies" or "Reply"
-            reply_parts = reply_aria.split()
-            for part in reply_parts:
-                if part.isdigit():
-                    data["reply_count"] = part
-                    break
+            os.makedirs(screenshot_dir, exist_ok=True)
+            screenshot_filename = f"@스크린샷_tweet_{data['status_id']}.png"
+            screenshot_path = os.path.join(screenshot_dir, screenshot_filename)
+
+            # 부드럽게 스크롤 (메인 스크롤 방해 최소화)
+            driver.execute_script("""
+                arguments[0].scrollIntoView({block: 'nearest', behavior: 'smooth'});
+            """, article)
+            time.sleep(0.2)
+
+            article.screenshot(screenshot_path)
+            data["screenshot_path"] = screenshot_path
         except:
-            pass
+            data["screenshot_path"] = ""
 
-        try:
-            # 리트윗 수
-            retweet_btn = article.find_element(By.CSS_SELECTOR, "button[data-testid='retweet']")
-            retweet_aria = retweet_btn.get_attribute("aria-label") or ""
-            # aria-label 예: "Repost. 50 reposts" or "Repost"
-            retweet_parts = retweet_aria.split()
-            for part in retweet_parts:
-                if part.isdigit():
-                    data["retweet_count"] = part
-                    break
-        except:
-            pass
-
-        try:
-            # 좋아요 수
-            like_btn = article.find_element(By.CSS_SELECTOR, "button[data-testid='like']")
-            like_aria = like_btn.get_attribute("aria-label") or ""
-            # aria-label 예: "Like. 100 likes" or "Like"
-            like_parts = like_aria.split()
-            for part in like_parts:
-                if part.isdigit():
-                    data["like_count"] = part
-                    break
-        except:
-            pass
-
-        # 스크린샷 캡처 (driver가 제공된 경우에만)
-        if driver and data["status_id"]:
-            try:
-                # 스크린샷 폴더 생성
-                os.makedirs(screenshot_dir, exist_ok=True)
-
-                # 파일명: @스크린샷_tweet_{status_id}.png
-                screenshot_filename = f"@스크린샷_tweet_{data['status_id']}.png"
-                screenshot_path = os.path.join(screenshot_dir, screenshot_filename)
-
-                # article 요소가 화면에 보이도록 부드럽게 스크롤 (메인 스크롤 방해 최소화)
-                driver.execute_script("""
-                    arguments[0].scrollIntoView({block: 'nearest', behavior: 'smooth'});
-                """, article)
-                time.sleep(0.2)  # 스크롤 안정화 대기
-
-                # article 요소 스크린샷 (상하단이 잘리지 않도록)
-                article.screenshot(screenshot_path)
-
-                data["screenshot_path"] = screenshot_path
-
-            except Exception as e:
-                # 스크린샷 실패해도 데이터 수집은 계속
-                data["screenshot_path"] = ""
-
-        return data
-    except Exception as e:
-        # 파싱 실패 로깅 (디버깅용)
-        try:
-            status_link = article.find_element(By.CSS_SELECTOR, "a[href*='/status/']")
-            status_url = status_link.get_attribute("href")
-            print(f"  ⚠️  파싱 실패: {status_url} - {str(e)[:50]}")
-        except:
-            print(f"  ⚠️  파싱 실패 (URL 미확인): {str(e)[:50]}")
-        return None
+    return data
 
 # -----------------------
 # 추출
@@ -729,7 +775,41 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None, max_tweets=None, 
         else:
             consecutive_no_dom_change += 1
             print(f"  ⏳ DOM 변화 없음 (연속 {consecutive_no_dom_change}회), 추가 대기 중...")
-            random_delay(8, 12, "DOM 업데이트 대기")
+
+            # 🔥 "Show more" 버튼 찾아서 클릭 시도
+            show_more_clicked = False
+            try:
+                # 다양한 "Show more" 버튼 선택자
+                show_more_selectors = [
+                    "//div[@role='button' and contains(., 'Show more')]",
+                    "//div[@role='button' and contains(., 'more replies')]",
+                    "//span[contains(text(), 'Show')]",
+                    "//span[contains(text(), 'more')]",
+                ]
+
+                for selector in show_more_selectors:
+                    try:
+                        buttons = driver.find_elements(By.XPATH, selector)
+                        for btn in buttons:
+                            if btn.is_displayed():
+                                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", btn)
+                                time.sleep(0.5)
+                                btn.click()
+                                print(f"  🔘 'Show more' 버튼 클릭 완료")
+                                show_more_clicked = True
+                                random_delay(3, 5, "Show more 로딩 대기")
+                                break
+                    except:
+                        continue
+
+                    if show_more_clicked:
+                        break
+            except:
+                pass
+
+            # Show more 클릭 후 또는 추가 대기
+            if not show_more_clicked:
+                random_delay(8, 12, "DOM 업데이트 대기")
 
             # 재확인
             articles_recheck = len(driver.find_elements(By.CSS_SELECTOR, "article[data-testid='tweet']"))
@@ -743,11 +823,22 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None, max_tweets=None, 
                 if new_h == last_h:
                     # DOM 변화 없음 + 신규 데이터 없음 = 종료 조건 (완화됨)
                     if consecutive_no_dom_change >= 5 and no_new_data >= 5:
-                        print(f"\n  {'─' * 66}")
-                        print(f"  🏁 수집 종료 조건 충족")
-                        print(f"      • DOM 무변화: {consecutive_no_dom_change}회 연속")
-                        print(f"      • 신규 데이터 없음: {no_new_data}회 연속")
-                        break
+                        # 마지막 확인: 한 번 더 스크롤 시도
+                        print(f"  🔍 페이지 끝 최종 확인 중...")
+                        driver.execute_script("window.scrollBy(0, 500);")
+                        random_delay(5, 8, "최종 확인 대기")
+
+                        final_article_count = len(driver.find_elements(By.CSS_SELECTOR, "article[data-testid='tweet']"))
+                        if final_article_count == articles_recheck:
+                            print(f"\n  {'─' * 66}")
+                            print(f"  🏁 수집 종료 조건 충족")
+                            print(f"      • DOM 무변화: {consecutive_no_dom_change}회 연속")
+                            print(f"      • 신규 데이터 없음: {no_new_data}회 연속")
+                            print(f"      • 최종 확인 완료")
+                            break
+                        else:
+                            print(f"  ✅ 최종 확인 후 추가 트윗 발견! 수집 계속...")
+                            consecutive_no_dom_change = 0
 
                     # DOM만 변화 없고 신규 데이터는 있었다면 조금 더 기다림
                     if consecutive_no_dom_change >= 7:
