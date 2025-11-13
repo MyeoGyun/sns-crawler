@@ -684,11 +684,6 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None, max_tweets=None, 
             print(f"  ⏹️  최대 스크롤 횟수 ({max_scrolls}회) 도달 - 수집 종료")
             break
 
-        # 🔥 봇 회피: 휴식 시간 체크
-        if take_rest_if_needed(len(all_tweets)):
-            # 휴식 후 계속 수집
-            continue
-
         # 부드러운 스크롤 실행 (봇 감지 회피)
         last_h = driver.execute_script("return document.body.scrollHeight")
         current_position = driver.execute_script("return window.pageYOffset")
@@ -749,6 +744,9 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None, max_tweets=None, 
                     if consecutive_no_dom_change >= 5:
                         print(f"\n  🏁 연속 5회 DOM 변화 없음 - 페이지 끝으로 판단")
                         break
+
+        # 🔥 봇 회피: 휴식 시간 체크 (스크롤 후에 체크)
+        take_rest_if_needed(len(all_tweets))
 
     print(f"\n{'═' * 70}")
     print(f"  ✅ 수집 완료!")
