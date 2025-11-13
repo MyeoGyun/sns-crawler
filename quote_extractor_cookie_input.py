@@ -17,6 +17,15 @@ from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
 
+# undetected-chromedriver 시도 (봇 감지 회피)
+try:
+    import undetected_chromedriver as uc
+    USE_UNDETECTED = True
+except ImportError:
+    USE_UNDETECTED = False
+    print("⚠️  [경고] undetected-chromedriver가 설치되지 않았습니다")
+    print("    pip install undetected-chromedriver 로 설치하면 봇 감지 회피 성능이 향상됩니다\n")
+
 try:
     from webdriver_manager.chrome import ChromeDriverManager
     AUTO_DRIVER = True
@@ -29,6 +38,16 @@ except ImportError:
 USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120 Safari/537.36"
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.path.join(BASE_DIR, ".env")
+
+# 봇 회피 설정
+DELAY_INCREASE_THRESHOLD = 60  # 딜레이 증가 시작 트윗 수
+DELAY_INCREASE_STEP = 10       # 매 10개마다 증가
+DELAY_INCREASE_AMOUNT = 2      # 증가량 (초)
+MAX_DELAY = 20                 # 최대 딜레이 (초)
+
+REST_INTERVALS = [60, 120, 180, 240, 300]  # 휴식 지점
+REST_MIN = 30                  # 최소 휴식 시간 (초)
+REST_MAX = 60                  # 최대 휴식 시간 (초)
 
 # -----------------------
 # 랜덤 딜레이 헬퍼 함수
@@ -47,6 +66,58 @@ def random_delay(min_sec=8, max_sec=12, description=""):
         print(f"  ⏱️  {description} ({delay:.1f}초)")
     time.sleep(delay)
     return delay
+
+def get_adaptive_delay(tweet_count):
+    """
+    트윗 수에 따라 딜레이를 점진적으로 증가시킵니다.
+
+    Args:
+        tweet_count: 현재까지 수집한 트윗 수
+
+    Returns:
+        tuple: (min_delay, max_delay)
+    """
+    if tweet_count <= DELAY_INCREASE_THRESHOLD:
+        return (8, 12)  # 기본 딜레이
+
+    # 60개 이후 매 10개마다 딜레이 증가
+    extra = ((tweet_count - DELAY_INCREASE_THRESHOLD) // DELAY_INCREASE_STEP) * DELAY_INCREASE_AMOUNT
+    min_delay = min(8 + extra, MAX_DELAY)
+    max_delay = min(12 + extra, MAX_DELAY + 2)
+
+    return (min_delay, max_delay)
+
+def take_rest_if_needed(tweet_count):
+    """
+    특정 트윗 개수마다 휴식 시간을 부여합니다.
+
+    Args:
+        tweet_count: 현재까지 수집한 트윗 수
+
+    Returns:
+        bool: 휴식을 취했으면 True
+    """
+    if tweet_count in REST_INTERVALS:
+        rest_time = random.uniform(REST_MIN, REST_MAX)
+        print(f"\n{'─' * 70}")
+        print(f"  🛑 [휴식 모드 - 봇 감지 회피]")
+        print(f"  {'─' * 66}")
+        print(f"      📊 현재 수집: {tweet_count}개")
+        print(f"      ⏰ 휴식 시간: {rest_time:.0f}초")
+        print(f"      💡 인간 행동 패턴을 모방하여 봇 감지를 회피합니다")
+        print(f"  {'─' * 66}")
+        print(f"      대기 중", end="", flush=True)
+
+        # 진행 표시
+        for i in range(int(rest_time)):
+            time.sleep(1)
+            if i % 5 == 0:
+                print(".", end="", flush=True)
+
+        print(" ✅ 완료!")
+        print(f"{'─' * 70}\n")
+        return True
+    return False
 
 # -----------------------
 # 쿠키 입력받기
@@ -277,46 +348,101 @@ def is_logged_in(driver, timeout=5):
 # Selenium 드라이버
 # -----------------------
 def make_driver(headless=True):
-    opts = Options()
-    if headless:
-        opts.add_argument("--headless=new")
-    opts.add_argument(f"user-agent={USER_AGENT}")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1200,2000")
+    """
+    Selenium WebDriver 생성 (가능하면 undetected-chromedriver 사용)
 
-    # 라이트 모드 강제 설정 (다크 모드 완전히 비활성화)
-    opts.add_argument("--force-dark-mode=0")
-    opts.add_argument("--disable-features=WebUIDarkMode")
-    opts.add_argument("--disable-features=DarkMode")
-    opts.add_argument("--force-color-profile=srgb")
+    Args:
+        headless: 헤드리스 모드 사용 여부
 
-    # Chrome preferences로 다크 모드 비활성화
-    prefs = {
-        "profile.default_content_setting_values.automatic_downloads": 1,
-        "download.prompt_for_download": False,
-        # 다크 모드 관련 설정
-        "profile.default_content_setting_values.theme": 0,  # 0 = light, 1 = dark
-        "profile.managed_default_content_settings.theme": 0,
-    }
-    opts.add_experimental_option("prefs", prefs)
+    Returns:
+        WebDriver 인스턴스
+    """
+    if USE_UNDETECTED:
+        # undetected-chromedriver 사용 (봇 감지 회피)
+        print(f"  🛡️  undetected-chromedriver 사용 (고급 봇 회피)")
 
-    # Local state로 테마 설정 (라이트 모드)
-    opts.add_experimental_option("localState", {
-        "browser": {
-            "enabled_labs_experiments": [
-                "disable-webui-dark-mode@1",
-                "disable-dark-mode@1"
-            ]
+        options = uc.ChromeOptions()
+        if headless:
+            options.add_argument("--headless=new")
+
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1200,2000")
+
+        # 라이트 모드 강제 설정
+        options.add_argument("--force-dark-mode=0")
+        options.add_argument("--disable-features=WebUIDarkMode")
+        options.add_argument("--disable-features=DarkMode")
+        options.add_argument("--force-color-profile=srgb")
+
+        # Chrome preferences
+        prefs = {
+            "profile.default_content_setting_values.automatic_downloads": 1,
+            "download.prompt_for_download": False,
+            "profile.default_content_setting_values.theme": 0,
+            "profile.managed_default_content_settings.theme": 0,
         }
-    })
+        options.add_experimental_option("prefs", prefs)
 
-    if AUTO_DRIVER:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=opts)
+        # Local state
+        options.add_experimental_option("localState", {
+            "browser": {
+                "enabled_labs_experiments": [
+                    "disable-webui-dark-mode@1",
+                    "disable-dark-mode@1"
+                ]
+            }
+        })
+
+        try:
+            driver = uc.Chrome(options=options, version_main=131)
+        except:
+            # 버전 자동 감지 실패 시
+            driver = uc.Chrome(options=options)
+
     else:
-        driver = webdriver.Chrome(options=opts)
+        # 일반 Selenium WebDriver 사용
+        print(f"  ⚙️  일반 Selenium WebDriver 사용")
+
+        opts = Options()
+        if headless:
+            opts.add_argument("--headless=new")
+        opts.add_argument(f"user-agent={USER_AGENT}")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--window-size=1200,2000")
+
+        # 라이트 모드 강제 설정
+        opts.add_argument("--force-dark-mode=0")
+        opts.add_argument("--disable-features=WebUIDarkMode")
+        opts.add_argument("--disable-features=DarkMode")
+        opts.add_argument("--force-color-profile=srgb")
+
+        # Chrome preferences
+        prefs = {
+            "profile.default_content_setting_values.automatic_downloads": 1,
+            "download.prompt_for_download": False,
+            "profile.default_content_setting_values.theme": 0,
+            "profile.managed_default_content_settings.theme": 0,
+        }
+        opts.add_experimental_option("prefs", prefs)
+
+        # Local state
+        opts.add_experimental_option("localState", {
+            "browser": {
+                "enabled_labs_experiments": [
+                    "disable-webui-dark-mode@1",
+                    "disable-dark-mode@1"
+                ]
+            }
+        })
+
+        if AUTO_DRIVER:
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=opts)
+        else:
+            driver = webdriver.Chrome(options=opts)
 
     driver.set_page_load_timeout(60)
     return driver
@@ -445,10 +571,24 @@ def parse_quote_tweet(article, driver=None, screenshot_dir="screenshots"):
 # -----------------------
 # 추출
 # -----------------------
-def extract_quote_tweets(driver, quotes_url, max_scrolls=None, capture_screenshots=True):
-    """인용글 추출"""
+def extract_quote_tweets(driver, quotes_url, max_scrolls=None, max_tweets=None, capture_screenshots=True):
+    """
+    인용글 추출 (봇 회피 기능 포함)
+
+    Args:
+        driver: Selenium WebDriver
+        quotes_url: 인용글 URL
+        max_scrolls: 최대 스크롤 횟수
+        max_tweets: 최대 수집 개수
+        capture_screenshots: 스크린샷 캡처 여부
+
+    Returns:
+        list: 추출된 트윗 데이터
+    """
     print(f"\n{'─' * 70}")
     print(f"  📄 인용글 페이지 접근 중...")
+    if max_tweets:
+        print(f"  🎯 목표: 최대 {max_tweets}개 수집")
     print(f"{'─' * 70}")
     driver.get(quotes_url)
     random_delay(5, 8, "페이지 로딩")
@@ -519,6 +659,13 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None, capture_screensho
                 media_icon = "📎" if tweet["has_media"] == "TRUE" else "  "
                 print(f"  {media_icon} #{len(all_tweets):3d}  {author:18s}  {text_preview}")
 
+                # 🔥 최대 개수 체크
+                if max_tweets and len(all_tweets) >= max_tweets:
+                    print(f"\n{'─' * 70}")
+                    print(f"  ✅ 최대 수집 개수 ({max_tweets}개) 도달 - 수집 종료")
+                    print(f"{'═' * 70}\n")
+                    return all_tweets
+
         # 스크롤 정보 표시
         scrolls += 1
         progress = f"({scrolls}/{max_scrolls})" if max_scrolls else ""
@@ -536,6 +683,11 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None, capture_screensho
         if max_scrolls and scrolls >= max_scrolls:
             print(f"  ⏹️  최대 스크롤 횟수 ({max_scrolls}회) 도달 - 수집 종료")
             break
+
+        # 🔥 봇 회피: 휴식 시간 체크
+        if take_rest_if_needed(len(all_tweets)):
+            # 휴식 후 계속 수집
+            continue
 
         # 부드러운 스크롤 실행 (봇 감지 회피)
         last_h = driver.execute_script("return document.body.scrollHeight")
@@ -555,8 +707,12 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None, capture_screensho
             driver.execute_script(f"window.scrollTo({{top: {int(next_position)}, behavior: 'smooth'}});")
             time.sleep(random.uniform(0.1, 0.3))  # 각 스텝마다 짧은 대기
 
-        # 초기 대기: 트위터 API 요청 및 응답 대기
-        random_delay(8, 12, "트위터 API 대기")
+        # 🔥 봇 회피: 적응형 딜레이
+        min_delay, max_delay = get_adaptive_delay(len(all_tweets))
+        delay_desc = "트위터 API 대기"
+        if len(all_tweets) > DELAY_INCREASE_THRESHOLD:
+            delay_desc = f"트위터 API 대기 (적응형: {len(all_tweets)}개 수집)"
+        random_delay(min_delay, max_delay, delay_desc)
 
         # DOM 변화 감지: 새로운 article이 추가되었는지 확인
         articles_after_scroll = len(driver.find_elements(By.CSS_SELECTOR, "article[data-testid='tweet']"))
@@ -796,6 +952,9 @@ def main():
     max_scrolls_input = input(f"  🔢 최대 스크롤 (엔터 = 무제한): ").strip()
     max_scrolls = int(max_scrolls_input) if max_scrolls_input else None
 
+    max_tweets_input = input(f"  🎯 최대 수집 개수 (엔터 = 무제한): ").strip()
+    max_tweets = int(max_tweets_input) if max_tweets_input else None
+
     headless_input = input(f"  👻 브라우저 숨김? (y/n, 엔터 = n): ").strip().lower()
     headless = headless_input in ['y', 'yes']
 
@@ -803,11 +962,22 @@ def main():
     screenshot_input = input(f"  📸 스크린샷 캡처? (y/n, 엔터 = y): ").strip().lower()
     capture_screenshots = screenshot_input != 'n'
 
-    # 실행
+    # 봇 회피 기능 안내
     print(f"\n{'═' * 70}")
+    print(f"  🛡️  봇 회피 기능 활성화")
+    print(f"  {'─' * 66}")
+    print(f"      ✅ 점진적 딜레이 증가 (60개 이후 자동)")
+    print(f"      ✅ 간헐적 휴식 (60, 120, 180, 240, 300개마다)")
+    if USE_UNDETECTED:
+        print(f"      ✅ undetected-chromedriver (고급 봇 감지 우회)")
+    else:
+        print(f"      ⚠️  일반 WebDriver 사용 (권장: pip install undetected-chromedriver)")
+    print(f"{'═' * 70}")
+
+    # 실행
     driver = None
     try:
-        print(f"  🚀 Chrome 드라이버 시작 중...")
+        print(f"\n  🚀 Chrome 드라이버 시작 중...")
         driver = make_driver(headless=headless)
 
         # 쿠키 로드
@@ -815,8 +985,8 @@ def main():
             print(f"\n  ❌ 쿠키 로드 실패")
             return
 
-        # 추출 (스크린샷 캡처 플래그 전달)
-        tweets = extract_quote_tweets(driver, url, max_scrolls=max_scrolls, capture_screenshots=capture_screenshots)
+        # 추출 (봇 회피 기능 포함)
+        tweets = extract_quote_tweets(driver, url, max_scrolls=max_scrolls, max_tweets=max_tweets, capture_screenshots=capture_screenshots)
 
         # 저장 (파일 확장자에 따라 Excel 또는 CSV로 저장)
         if tweets:
