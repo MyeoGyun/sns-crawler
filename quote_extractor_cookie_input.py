@@ -9,12 +9,22 @@ import os
 import time
 import csv
 import getpass
+import random
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.chrome.service import Service
 from selenium.webdriver.common.by import By
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.support import expected_conditions as EC
+
+# undetected-chromedriver 시도
+try:
+    import undetected_chromedriver as uc
+    USE_UNDETECTED = True
+except ImportError:
+    USE_UNDETECTED = False
+    print("[경고] undetected-chromedriver가 설치되지 않았습니다")
+    print("       pip install undetected-chromedriver 로 설치하면 봇 감지 회피 성능이 향상됩니다")
 
 try:
     from webdriver_manager.chrome import ChromeDriverManager
@@ -29,6 +39,18 @@ USER_AGENT = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTM
 SCROLL_PAUSE = 2.0
 BASE_DIR = os.path.dirname(os.path.abspath(__file__))
 ENV_FILE = os.path.join(BASE_DIR, ".env")
+
+# 봇 회피 설정
+BASE_DELAY = 2.0          # 기본 딜레이 (초)
+MAX_DELAY = 20.0          # 최대 딜레이 (초)
+DELAY_INCREASE_THRESHOLD = 60  # 딜레이 증가 시작 트윗 수
+DELAY_INCREASE_STEP = 10  # 딜레이 증가 간격 (트윗 개수)
+DELAY_INCREASE_AMOUNT = 2  # 증가 딜레이 양 (초)
+
+# 휴식 설정
+REST_INTERVALS = [60, 120, 180, 240, 300]  # 휴식을 취할 트윗 개수
+REST_MIN = 30             # 최소 휴식 시간 (초)
+REST_MAX = 60             # 최대 휴식 시간 (초)
 
 # -----------------------
 # 쿠키 입력받기
@@ -252,23 +274,104 @@ def is_logged_in(driver, timeout=5):
         return False
 
 # -----------------------
+# 봇 회피 함수
+# -----------------------
+def get_adaptive_delay(tweet_count):
+    """
+    트윗 수에 따라 딜레이를 점진적으로 증가
+
+    Args:
+        tweet_count: 현재까지 수집한 트윗 수
+
+    Returns:
+        float: 적용할 딜레이 (초)
+    """
+    if tweet_count <= DELAY_INCREASE_THRESHOLD:
+        return BASE_DELAY
+
+    # 60개 이후 매 10개마다 +2초
+    extra = ((tweet_count - DELAY_INCREASE_THRESHOLD) // DELAY_INCREASE_STEP) * DELAY_INCREASE_AMOUNT
+    adaptive_delay = BASE_DELAY + extra
+
+    # 최대 딜레이 제한
+    return min(adaptive_delay, MAX_DELAY)
+
+def take_rest_if_needed(tweet_count):
+    """
+    특정 트윗 개수마다 휴식 시간 부여
+
+    Args:
+        tweet_count: 현재까지 수집한 트윗 수
+
+    Returns:
+        bool: 휴식을 취했으면 True
+    """
+    if tweet_count in REST_INTERVALS:
+        rest_time = random.uniform(REST_MIN, REST_MAX)
+        print(f"\n🛑 [휴식 모드]")
+        print(f"   현재 수집: {tweet_count}개")
+        print(f"   휴식 시간: {rest_time:.0f}초 (인간 행동 패턴 모방)")
+        print(f"   대기 중", end="", flush=True)
+
+        # 진행 표시
+        for i in range(int(rest_time)):
+            time.sleep(1)
+            if i % 5 == 0:
+                print(".", end="", flush=True)
+
+        print(" 완료!")
+        return True
+    return False
+
+# -----------------------
 # Selenium 드라이버
 # -----------------------
 def make_driver(headless=True):
-    opts = Options()
-    if headless:
-        opts.add_argument("--headless=new")
-    opts.add_argument(f"user-agent={USER_AGENT}")
-    opts.add_argument("--disable-blink-features=AutomationControlled")
-    opts.add_argument("--no-sandbox")
-    opts.add_argument("--disable-dev-shm-usage")
-    opts.add_argument("--window-size=1200,2000")
+    """
+    Selenium WebDriver 생성 (가능하면 undetected-chromedriver 사용)
 
-    if AUTO_DRIVER:
-        service = Service(ChromeDriverManager().install())
-        driver = webdriver.Chrome(service=service, options=opts)
+    Args:
+        headless: 헤드리스 모드 사용 여부
+
+    Returns:
+        WebDriver 인스턴스
+    """
+    if USE_UNDETECTED:
+        # undetected-chromedriver 사용 (봇 감지 회피)
+        print("[정보] undetected-chromedriver 사용 (고급 봇 회피)")
+
+        options = uc.ChromeOptions()
+        if headless:
+            options.add_argument("--headless=new")
+
+        options.add_argument("--no-sandbox")
+        options.add_argument("--disable-dev-shm-usage")
+        options.add_argument("--window-size=1200,2000")
+
+        try:
+            driver = uc.Chrome(options=options, version_main=131)
+        except:
+            # 버전 자동 감지 실패 시 버전 지정 없이 시도
+            driver = uc.Chrome(options=options)
+
     else:
-        driver = webdriver.Chrome(options=opts)
+        # 일반 Selenium WebDriver 사용
+        print("[정보] 일반 Selenium WebDriver 사용")
+
+        opts = Options()
+        if headless:
+            opts.add_argument("--headless=new")
+        opts.add_argument(f"user-agent={USER_AGENT}")
+        opts.add_argument("--disable-blink-features=AutomationControlled")
+        opts.add_argument("--no-sandbox")
+        opts.add_argument("--disable-dev-shm-usage")
+        opts.add_argument("--window-size=1200,2000")
+
+        if AUTO_DRIVER:
+            service = Service(ChromeDriverManager().install())
+            driver = webdriver.Chrome(service=service, options=opts)
+        else:
+            driver = webdriver.Chrome(options=opts)
 
     driver.set_page_load_timeout(60)
     return driver
@@ -332,11 +435,22 @@ def parse_quote_tweet(article):
 # -----------------------
 # 추출
 # -----------------------
-def extract_quote_tweets(driver, quotes_url, max_scrolls=None):
-    """인용글 추출"""
+def extract_quote_tweets(driver, quotes_url, max_scrolls=None, max_tweets=None):
+    """
+    인용글 추출 (봇 회피 기능 포함)
+
+    Args:
+        driver: Selenium WebDriver
+        quotes_url: 인용글 URL
+        max_scrolls: 최대 스크롤 횟수 (None = 무제한)
+        max_tweets: 최대 수집 개수 (None = 무제한)
+
+    Returns:
+        list: 추출된 트윗 데이터
+    """
     print(f"\n[정보] 인용글 페이지 접근...")
     driver.get(quotes_url)
-    time.sleep(3)
+    time.sleep(random.uniform(3, 5))  # 초기 로딩 랜덤 대기
 
     all_tweets = []
     seen_ids = set()
@@ -344,6 +458,8 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None):
     no_new = 0
 
     print("[정보] 스크롤 및 데이터 수집 시작...")
+    if max_tweets:
+        print(f"[목표] 최대 {max_tweets}개 수집")
     print("=" * 60)
 
     while True:
@@ -369,6 +485,14 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None):
                     media_count = len(tweet["media_urls"].split(", "))
                     print(f"              └─ 미디어 {media_count}개 포함")
 
+                # 🔥 최대 개수 체크
+                if max_tweets and len(all_tweets) >= max_tweets:
+                    print(f"\n[정보] 최대 수집 개수 ({max_tweets}개) 도달 - 수집 종료")
+                    print("=" * 60)
+                    print(f"[완료] 총 {len(all_tweets)}개 인용글 수집 완료")
+                    print("=" * 60)
+                    return all_tweets
+
         # 스크롤 정보 표시
         scrolls += 1
         scroll_info = f"[스크롤 #{scrolls:2d}]"
@@ -388,15 +512,31 @@ def extract_quote_tweets(driver, quotes_url, max_scrolls=None):
         else:
             no_new = 0
 
+        # 🔥 봇 회피: 휴식 시간
+        if take_rest_if_needed(len(all_tweets)):
+            # 휴식 후 계속 수집
+            print("=" * 60)
+            continue
+
         # 스크롤 실행
         last_h = driver.execute_script("return document.body.scrollHeight")
         driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
 
-        # 스크롤 대기
-        if scrolls < 3:
-            print(f"[대기] 페이지 로딩 중... ({SCROLL_PAUSE}초)")
-        time.sleep(SCROLL_PAUSE)
+        # 🔥 봇 회피: 적응형 딜레이
+        adaptive_delay = get_adaptive_delay(len(all_tweets))
 
+        # 딜레이에 노이즈 추가 (±0.5초)
+        actual_delay = adaptive_delay + random.uniform(-0.5, 0.5)
+
+        # 대기 메시지
+        if len(all_tweets) > DELAY_INCREASE_THRESHOLD:
+            print(f"[대기] {actual_delay:.1f}초 대기 중... (적응형 딜레이: {len(all_tweets)}개 수집)")
+        elif scrolls < 3:
+            print(f"[대기] 페이지 로딩 중... ({actual_delay:.1f}초)")
+
+        time.sleep(actual_delay)
+
+        # 페이지 끝 체크
         new_h = driver.execute_script("return document.body.scrollHeight")
         if new_h == last_h:
             print("[정보] 페이지 끝 도달 - 수집 종료")
@@ -472,11 +612,24 @@ def main():
     max_scrolls_input = input("최대 스크롤 (엔터 = 무제한): ").strip()
     max_scrolls = int(max_scrolls_input) if max_scrolls_input else None
 
+    max_tweets_input = input("최대 수집 개수 (엔터 = 무제한): ").strip()
+    max_tweets = int(max_tweets_input) if max_tweets_input else None
+
     headless_input = input("브라우저 숨김? (y/n, 엔터 = n): ").strip().lower()
     headless = headless_input in ['y', 'yes']
 
     # 실행
     print("\n" + "=" * 60)
+    print("🚀 봇 회피 기능 활성화")
+    print("  ✅ 점진적 딜레이 증가 (60개 이후)")
+    print("  ✅ 간헐적 휴식 (60, 120, 180, 240, 300개마다)")
+    if USE_UNDETECTED:
+        print("  ✅ undetected-chromedriver (고급 봇 감지 우회)")
+    else:
+        print("  ⚠️  일반 WebDriver 사용 (undetected-chromedriver 미설치)")
+        print("      pip install undetected-chromedriver 권장")
+    print("=" * 60)
+
     driver = None
     try:
         print("[정보] Chrome 드라이버 시작...")
@@ -488,7 +641,7 @@ def main():
             return
 
         # 추출
-        tweets = extract_quote_tweets(driver, url, max_scrolls=max_scrolls)
+        tweets = extract_quote_tweets(driver, url, max_scrolls=max_scrolls, max_tweets=max_tweets)
 
         # 저장
         if tweets:
