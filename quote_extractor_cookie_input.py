@@ -44,7 +44,7 @@ def random_delay(min_sec=8, max_sec=12, description=""):
     """
     delay = random.uniform(min_sec, max_sec)
     if description:
-        print(f"[대기] {description} ({delay:.1f}초)")
+        print(f"  ⏱️  {description} ({delay:.1f}초)")
     time.sleep(delay)
     return delay
 
@@ -181,11 +181,12 @@ def load_cookies_to_driver(driver, cookies):
     """
     try:
         # Twitter 홈페이지로 먼저 이동 (쿠키 도메인 일치 필요)
-        print("[정보] Twitter 접속 중...")
+        print(f"\n{'─' * 70}")
+        print(f"  🌐 Twitter 접속 중...")
         driver.get("https://x.com")
         random_delay(3, 6, "페이지 초기 로딩")
 
-        print("[정보] 쿠키 로드 중...")
+        print(f"  🔑 쿠키 로드 중...")
 
         # 필수 쿠키
         required_cookies = {
@@ -202,7 +203,7 @@ def load_cookies_to_driver(driver, cookies):
         # 필수 쿠키 확인
         missing = [k for k, v in required_cookies.items() if not v]
         if missing:
-            print(f"[오류] 필수 쿠키 누락: {', '.join(missing)}")
+            print(f"  ❌ 필수 쿠키 누락: {', '.join(missing)}")
             return False
 
         # 쿠키 추가
@@ -218,27 +219,30 @@ def load_cookies_to_driver(driver, cookies):
                     })
                     cookies_added += 1
                 except Exception as e:
-                    print(f"[경고] 쿠키 추가 실패 ({name}): {e}")
+                    print(f"  ⚠️  쿠키 추가 실패 ({name}): {e}")
 
-        print(f"[성공] {cookies_added}개 쿠키 로드 완료")
+        print(f"  ✅ {cookies_added}개 쿠키 로드 완료")
 
         # 쿠키 적용 확인
-        print("[정보] 세션 검증 중...")
+        print(f"  🔐 세션 검증 중...")
         driver.get("https://x.com/home")
         random_delay(5, 8, "로그인 세션 검증")
 
         # 로그인 상태 확인
         if is_logged_in(driver):
-            print("[성공] 쿠키로 로그인 성공!")
+            print(f"  ✅ 쿠키로 로그인 성공!")
+            print(f"{'─' * 70}\n")
             return True
         else:
-            print("[오류] 쿠키가 유효하지 않습니다")
-            print("[안내] Chrome에서 다시 로그인하여 새 쿠키를 가져오세요")
-            print("       쿠키 만료 또는 값이 잘못되었을 수 있습니다")
+            print(f"  ❌ 쿠키가 유효하지 않습니다")
+            print(f"  ℹ️  Chrome에서 다시 로그인하여 새 쿠키를 가져오세요")
+            print(f"      (쿠키 만료 또는 값이 잘못되었을 수 있습니다)")
+            print(f"{'─' * 70}\n")
             return False
 
     except Exception as e:
-        print(f"[오류] 쿠키 로드 실패: {e}")
+        print(f"  ❌ 쿠키 로드 실패: {e}")
+        print(f"{'─' * 70}\n")
         return False
 
 # -----------------------
@@ -282,6 +286,32 @@ def make_driver(headless=True):
     opts.add_argument("--disable-dev-shm-usage")
     opts.add_argument("--window-size=1200,2000")
 
+    # 라이트 모드 강제 설정 (다크 모드 완전히 비활성화)
+    opts.add_argument("--force-dark-mode=0")
+    opts.add_argument("--disable-features=WebUIDarkMode")
+    opts.add_argument("--disable-features=DarkMode")
+    opts.add_argument("--force-color-profile=srgb")
+
+    # Chrome preferences로 다크 모드 비활성화
+    prefs = {
+        "profile.default_content_setting_values.automatic_downloads": 1,
+        "download.prompt_for_download": False,
+        # 다크 모드 관련 설정
+        "profile.default_content_setting_values.theme": 0,  # 0 = light, 1 = dark
+        "profile.managed_default_content_settings.theme": 0,
+    }
+    opts.add_experimental_option("prefs", prefs)
+
+    # Local state로 테마 설정 (라이트 모드)
+    opts.add_experimental_option("localState", {
+        "browser": {
+            "enabled_labs_experiments": [
+                "disable-webui-dark-mode@1",
+                "disable-dark-mode@1"
+            ]
+        }
+    })
+
     if AUTO_DRIVER:
         service = Service(ChromeDriverManager().install())
         driver = webdriver.Chrome(service=service, options=opts)
@@ -294,8 +324,8 @@ def make_driver(headless=True):
 # -----------------------
 # 파싱
 # -----------------------
-def parse_quote_tweet(article):
-    """트윗 파싱"""
+def parse_quote_tweet(article, driver=None, screenshot_dir="screenshots"):
+    """트윗 파싱 및 스크린샷 캡처"""
     try:
         data = {
             "status_id": "", "url": "", "author_handle": "", "text": "",
@@ -303,6 +333,7 @@ def parse_quote_tweet(article):
             "media_urls": "", "is_quote": "FALSE",
             "quote_status_id": "인용X", "quote_time_iso_utc": "인용X",
             "reply_count": "0", "retweet_count": "0", "like_count": "0",
+            "screenshot_path": "",  # 스크린샷 경로 추가
         }
 
         # status_id 및 url
@@ -384,6 +415,29 @@ def parse_quote_tweet(article):
         except:
             pass
 
+        # 스크린샷 캡처 (driver가 제공된 경우에만)
+        if driver and data["status_id"]:
+            try:
+                # 스크린샷 폴더 생성
+                os.makedirs(screenshot_dir, exist_ok=True)
+
+                # 파일명: @스크린샷_tweet_{status_id}.png
+                screenshot_filename = f"@스크린샷_tweet_{data['status_id']}.png"
+                screenshot_path = os.path.join(screenshot_dir, screenshot_filename)
+
+                # article 요소가 화면에 완전히 보이도록 스크롤
+                driver.execute_script("arguments[0].scrollIntoView({block: 'center'});", article)
+                time.sleep(0.3)  # 스크롤 안정화 대기
+
+                # article 요소 스크린샷 (상하단이 잘리지 않도록)
+                article.screenshot(screenshot_path)
+
+                data["screenshot_path"] = screenshot_path
+
+            except Exception as e:
+                # 스크린샷 실패해도 데이터 수집은 계속
+                data["screenshot_path"] = ""
+
         return data
     except:
         return None
@@ -391,96 +445,291 @@ def parse_quote_tweet(article):
 # -----------------------
 # 추출
 # -----------------------
-def extract_quote_tweets(driver, quotes_url, max_scrolls=None):
+def extract_quote_tweets(driver, quotes_url, max_scrolls=None, capture_screenshots=True):
     """인용글 추출"""
-    print(f"\n[정보] 인용글 페이지 접근...")
+    print(f"\n{'─' * 70}")
+    print(f"  📄 인용글 페이지 접근 중...")
+    print(f"{'─' * 70}")
     driver.get(quotes_url)
-    random_delay(5, 8, "인용글 페이지 로딩")
+    random_delay(5, 8, "페이지 로딩")
+
+    # 강제 라이트 모드 적용 (JavaScript로 직접 설정)
+    try:
+        print(f"  🌞 라이트 모드 강제 적용 중...")
+        driver.execute_script("""
+            // 1. HTML 요소의 다크 모드 속성 제거
+            document.documentElement.removeAttribute('data-color-mode');
+            document.documentElement.removeAttribute('data-theme');
+            document.documentElement.style.colorScheme = 'light';
+
+            // 2. body의 다크 모드 클래스 제거
+            document.body.classList.remove('dark');
+            document.body.classList.add('light');
+
+            // 3. CSS 변수로 강제 라이트 모드 색상 적용
+            document.documentElement.style.setProperty('--background-color', '#ffffff');
+            document.documentElement.style.setProperty('--color-background', '#ffffff');
+
+            // 4. localStorage에 라이트 모드 설정 저장
+            try {
+                localStorage.setItem('theme', 'light');
+                localStorage.setItem('nightMode', 'false');
+            } catch(e) {}
+        """)
+        print(f"  ✅ 라이트 모드 적용 완료")
+    except Exception as e:
+        print(f"  ⚠️  라이트 모드 적용 실패 (무시하고 계속): {e}")
 
     all_tweets = []
     seen_ids = set()
     scrolls = 0
-    no_new = 0
+    no_new_data = 0
+    consecutive_no_dom_change = 0
 
-    print("[정보] 스크롤 및 데이터 수집 시작...")
-    print("=" * 60)
+    print(f"\n{'═' * 70}")
+    print(f"  🔄 스크롤 및 데이터 수집 시작")
+    print(f"{'═' * 70}\n")
 
     while True:
+        # 현재 DOM에 있는 article 개수 기록 (무한 스크롤 감지용)
+        try:
+            articles_before_scroll = len(driver.find_elements(By.CSS_SELECTOR, "article[data-testid='tweet']"))
+        except:
+            articles_before_scroll = 0
+
+        # 현재 페이지의 모든 트윗 파싱
         try:
             articles = driver.find_elements(By.CSS_SELECTOR, "article[data-testid='tweet']")
         except:
+            print("  ⚠️  article 요소를 찾을 수 없습니다")
             break
 
         new = 0
         for article in articles:
-            tweet = parse_quote_tweet(article)
+            # 스크린샷 캡처가 활성화된 경우에만 driver 전달
+            tweet = parse_quote_tweet(article, driver=driver if capture_screenshots else None)
             if tweet and tweet["status_id"] and tweet["status_id"] not in seen_ids:
                 seen_ids.add(tweet["status_id"])
                 all_tweets.append(tweet)
                 new += 1
 
                 # 각 트윗 추출 시 즉시 로그 출력
-                text_preview = tweet["text"][:50] + "..." if len(tweet["text"]) > 50 else tweet["text"]
-                print(f"[수집 #{len(all_tweets):3d}] {tweet['author_handle']:20s} | {text_preview}")
-
-                # 미디어 정보 표시
-                if tweet["has_media"] == "TRUE":
-                    media_count = len(tweet["media_urls"].split(", "))
-                    print(f"              └─ 미디어 {media_count}개 포함")
+                text_preview = tweet["text"][:45] + "..." if len(tweet["text"]) > 45 else tweet["text"]
+                author = tweet['author_handle'][:18]
+                media_icon = "📎" if tweet["has_media"] == "TRUE" else "  "
+                print(f"  {media_icon} #{len(all_tweets):3d}  {author:18s}  {text_preview}")
 
         # 스크롤 정보 표시
         scrolls += 1
-        scroll_info = f"[스크롤 #{scrolls:2d}]"
-        if max_scrolls:
-            scroll_info += f" ({scrolls}/{max_scrolls})"
+        progress = f"({scrolls}/{max_scrolls})" if max_scrolls else ""
 
-        if new > 0:
-            print(f"\n{scroll_info} 이번 스크롤에서 {new}개 신규 추출 (총 {len(all_tweets)}개)")
-        else:
-            print(f"\n{scroll_info} 신규 데이터 없음 (중복 또는 끝)")
-            no_new += 1
+        print(f"\n  {'─' * 66}")
+        print(f"  📊 스크롤 #{scrolls:02d} {progress:8s}  |  DOM: {len(articles):3d}개  |  신규: {new:2d}개  |  총: {len(all_tweets):3d}개")
 
+        # 신규 데이터 없음 카운터
         if new == 0:
-            if no_new >= 3:
-                print("[정보] 연속 3회 신규 데이터 없음 - 수집 종료")
-                break
+            no_new_data += 1
         else:
-            no_new = 0
+            no_new_data = 0
 
-        # 스크롤 실행
-        last_h = driver.execute_script("return document.body.scrollHeight")
-        driver.execute_script("window.scrollTo(0, document.body.scrollHeight);")
-
-        # 스크롤 대기 (랜덤 딜레이로 봇 감지 회피 및 네트워크 로딩 여유)
-        random_delay(8, 12, "페이지 스크롤 후 로딩")
-
-        new_h = driver.execute_script("return document.body.scrollHeight")
-        if new_h == last_h:
-            print("[정보] 페이지 끝 도달 - 수집 종료")
-            break
-
+        # 최대 스크롤 도달 확인
         if max_scrolls and scrolls >= max_scrolls:
-            print(f"[정보] 최대 스크롤 횟수 ({max_scrolls}회) 도달 - 수집 종료")
+            print(f"  ⏹️  최대 스크롤 횟수 ({max_scrolls}회) 도달 - 수집 종료")
             break
 
-        print("=" * 60)
+        # 부드러운 스크롤 실행 (봇 감지 회피)
+        last_h = driver.execute_script("return document.body.scrollHeight")
+        current_position = driver.execute_script("return window.pageYOffset")
 
-    print("\n" + "=" * 60)
-    print(f"[완료] 총 {len(all_tweets)}개 인용글 수집 완료")
-    print("=" * 60)
+        # 현재 위치에서 조금씩 스크롤 (사람처럼)
+        scroll_steps = random.randint(3, 6)  # 3~6단계로 나눠서 스크롤
+        target_position = last_h
+        step_size = (target_position - current_position) / scroll_steps
+
+        for step in range(scroll_steps):
+            next_position = current_position + (step_size * (step + 1))
+            # 약간의 오버슈팅/언더슈팅으로 자연스러움 추가
+            noise = random.uniform(-50, 50)
+            next_position = max(0, next_position + noise)
+
+            driver.execute_script(f"window.scrollTo({{top: {int(next_position)}, behavior: 'smooth'}});")
+            time.sleep(random.uniform(0.1, 0.3))  # 각 스텝마다 짧은 대기
+
+        # 초기 대기: 트위터 API 요청 및 응답 대기
+        random_delay(8, 12, "트위터 API 대기")
+
+        # DOM 변화 감지: 새로운 article이 추가되었는지 확인
+        articles_after_scroll = len(driver.find_elements(By.CSS_SELECTOR, "article[data-testid='tweet']"))
+        dom_changed = articles_after_scroll > articles_before_scroll
+
+        if dom_changed:
+            delta = articles_after_scroll - articles_before_scroll
+            print(f"  ✅ DOM 업데이트: {articles_before_scroll} → {articles_after_scroll} (+{delta})")
+            consecutive_no_dom_change = 0
+        else:
+            consecutive_no_dom_change += 1
+            print(f"  ⏳ DOM 변화 없음 (연속 {consecutive_no_dom_change}회), 추가 대기 중...")
+            random_delay(5, 8, "DOM 업데이트 대기")
+
+            # 재확인
+            articles_recheck = len(driver.find_elements(By.CSS_SELECTOR, "article[data-testid='tweet']"))
+            if articles_recheck > articles_after_scroll:
+                delta = articles_recheck - articles_after_scroll
+                print(f"  ✅ 추가 대기 후 증가: {articles_after_scroll} → {articles_recheck} (+{delta})")
+                consecutive_no_dom_change = 0
+            else:
+                # 페이지 높이도 확인
+                new_h = driver.execute_script("return document.body.scrollHeight")
+                if new_h == last_h:
+                    # DOM 변화 없음 + 신규 데이터 없음 = 종료 조건
+                    if consecutive_no_dom_change >= 3 and no_new_data >= 3:
+                        print(f"\n  {'─' * 66}")
+                        print(f"  🏁 수집 종료 조건 충족")
+                        print(f"      • DOM 무변화: {consecutive_no_dom_change}회 연속")
+                        print(f"      • 신규 데이터 없음: {no_new_data}회 연속")
+                        break
+
+                    # DOM만 변화 없고 신규 데이터는 있었다면 조금 더 기다림
+                    if consecutive_no_dom_change >= 5:
+                        print(f"\n  🏁 연속 5회 DOM 변화 없음 - 페이지 끝으로 판단")
+                        break
+
+    print(f"\n{'═' * 70}")
+    print(f"  ✅ 수집 완료!")
+    print(f"  {'─' * 66}")
+    print(f"      📝 총 수집 트윗:  {len(all_tweets)}개")
+    print(f"      🔄 총 스크롤 횟수: {scrolls}회")
+    final_article_count = len(driver.find_elements(By.CSS_SELECTOR, 'article[data-testid="tweet"]'))
+    print(f"      📊 최종 DOM 개수:  {final_article_count}개")
+    print(f"{'═' * 70}\n")
     return all_tweets
 
 # -----------------------
-# CSV 저장
+# 엑셀 저장 (이미지 포함)
 # -----------------------
-def save_to_csv(tweets, output_path):
-    """CSV 저장"""
-    if not tweets:
-        print("[경고] 저장할 데이터 없음")
+def save_to_excel(tweets, output_path):
+    """엑셀 파일 저장 (스크린샷 이미지 포함)"""
+    try:
+        from openpyxl import Workbook
+        from openpyxl.drawing.image import Image as XLImage
+        from openpyxl.styles import Font, Alignment, PatternFill
+    except ImportError:
+        print("  ⚠️  openpyxl 라이브러리가 필요합니다: pip install openpyxl Pillow")
         return
 
-    # 요청된 컬럼 순서: "등록일자", "게시물번호", "좋아요수", "리트윗수", "댓글수",
-    #                  "내용", "해시태그", "게시물URL", "작성자URL", "작성자아이디"
+    if not tweets:
+        print("  ⚠️  저장할 데이터 없음")
+        return
+
+    print(f"\n{'─' * 70}")
+    print(f"  📊 엑셀 파일 생성 중...")
+    print(f"{'─' * 70}")
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = "인용글 목록"
+
+    # 헤더 작성
+    headers = ["스크린샷", "등록일자", "게시물번호", "좋아요수", "리트윗수", "댓글수",
+               "내용", "해시태그", "게시물URL", "작성자URL", "작성자아이디"]
+    ws.append(headers)
+
+    # 헤더 스타일 적용
+    header_fill = PatternFill(start_color="CCE5FF", end_color="CCE5FF", fill_type="solid")
+    header_font = Font(bold=True)
+    for col_idx, header in enumerate(headers, start=1):
+        cell = ws.cell(row=1, column=col_idx)
+        cell.fill = header_fill
+        cell.font = header_font
+        cell.alignment = Alignment(horizontal="center", vertical="center")
+
+    # 열 너비 설정
+    ws.column_dimensions['A'].width = 35  # 스크린샷
+    ws.column_dimensions['B'].width = 20  # 등록일자
+    ws.column_dimensions['C'].width = 18  # 게시물번호
+    ws.column_dimensions['D'].width = 10  # 좋아요수
+    ws.column_dimensions['E'].width = 10  # 리트윗수
+    ws.column_dimensions['F'].width = 10  # 댓글수
+    ws.column_dimensions['G'].width = 50  # 내용
+    ws.column_dimensions['H'].width = 30  # 해시태그
+    ws.column_dimensions['I'].width = 40  # 게시물URL
+    ws.column_dimensions['J'].width = 30  # 작성자URL
+    ws.column_dimensions['K'].width = 20  # 작성자아이디
+
+    # 데이터 행 추가
+    for idx, tweet in enumerate(tweets, start=2):
+        row_data = [
+            "",  # 스크린샷 열 (이미지로 채움)
+            tweet.get("time_iso_utc", ""),
+            tweet.get("status_id", ""),
+            tweet.get("like_count", "0"),
+            tweet.get("retweet_count", "0"),
+            tweet.get("reply_count", "0"),
+            tweet.get("text", ""),
+            tweet.get("hashtags", ""),
+            tweet.get("url", ""),
+            tweet.get("url", "").rsplit("/status/", 1)[0] if tweet.get("url") else "",
+            tweet.get("author_handle", ""),
+        ]
+        ws.append(row_data)
+
+        # 텍스트 셀 정렬
+        for col_idx in range(2, 12):  # B열부터 K열까지
+            cell = ws.cell(row=idx, column=col_idx)
+            cell.alignment = Alignment(vertical="top", wrap_text=True)
+
+        # 스크린샷 이미지 삽입
+        screenshot_path = tweet.get("screenshot_path", "")
+        if screenshot_path and os.path.exists(screenshot_path):
+            try:
+                img = XLImage(screenshot_path)
+
+                # 이미지 크기 조정 (높이 250px로 통일)
+                target_height = 250
+                aspect_ratio = img.width / img.height
+                img.height = target_height
+                img.width = int(target_height * aspect_ratio)
+
+                # A열에 이미지 추가
+                cell_address = f"A{idx}"
+                ws.add_image(img, cell_address)
+
+                # 행 높이 조정 (포인트 단위, 1px ≈ 0.75pt)
+                ws.row_dimensions[idx].height = target_height * 0.75
+
+                if idx % 10 == 0:
+                    print(f"  📸 {idx-1}개 이미지 삽입 완료...")
+
+            except Exception as e:
+                print(f"  ⚠️  이미지 삽입 실패 (행 {idx}): {e}")
+        else:
+            # 이미지 없으면 행 높이 기본값
+            ws.row_dimensions[idx].height = 20
+
+    # 첫 행 고정 (헤더)
+    ws.freeze_panes = "A2"
+
+    # 파일 저장
+    wb.save(output_path)
+
+    print(f"\n{'─' * 70}")
+    print(f"  💾 엑셀 파일 저장 완료!")
+    print(f"  {'─' * 66}")
+    print(f"      📁 파일명: {output_path}")
+    print(f"      📊 레코드: {len(tweets)}개")
+    print(f"      🖼️  이미지: {sum(1 for t in tweets if t.get('screenshot_path') and os.path.exists(t.get('screenshot_path')))}개")
+    print(f"{'─' * 70}\n")
+
+# -----------------------
+# CSV 저장 (백업용)
+# -----------------------
+def save_to_csv(tweets, output_path):
+    """CSV 저장 (이미지 없는 버전)"""
+    if not tweets:
+        print("  ⚠️  저장할 데이터 없음")
+        return
+
+    # 요청된 컬럼 순서
     fieldnames = ["등록일자", "게시물번호", "좋아요수", "리트윗수", "댓글수",
                   "내용", "해시태그", "게시물URL", "작성자URL", "작성자아이디"]
 
@@ -488,7 +737,6 @@ def save_to_csv(tweets, output_path):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for tweet in tweets:
-            # 기존 필드명을 새 필드명으로 매핑
             mapped_tweet = {
                 "등록일자": tweet.get("time_iso_utc", ""),
                 "게시물번호": tweet.get("status_id", ""),
@@ -503,79 +751,93 @@ def save_to_csv(tweets, output_path):
             }
             writer.writerow(mapped_tweet)
 
-    print(f"\n[완료] CSV 저장: {output_path}")
-    print(f"  - 총 {len(tweets)}개 레코드")
+    print(f"\n{'─' * 70}")
+    print(f"  💾 CSV 파일 저장 완료!")
+    print(f"  {'─' * 66}")
+    print(f"      📁 파일명: {output_path}")
+    print(f"      📊 레코드: {len(tweets)}개")
+    print(f"{'─' * 70}\n")
 
 # -----------------------
 # 메인
 # -----------------------
 def main():
-    print("=" * 60)
-    print("   트위터 인용글 추출 - 쿠키 직접 입력 버전")
-    print("=" * 60)
+    print(f"\n{'═' * 70}")
+    print(f"  🐦 트위터 인용글 추출기 (쿠키 직접 입력 버전)")
+    print(f"{'═' * 70}\n")
 
     # 쿠키 입력받기
     cookies = get_cookies_from_user()
     if not cookies:
-        print("\n[오류] 쿠키 입력이 취소되었습니다")
+        print(f"\n  ❌ 쿠키 입력이 취소되었습니다")
         return
 
     # .env 파일로 저장할지 물어보기
-    print("\n" + "=" * 60)
-    save_choice = input("입력한 쿠키를 .env 파일로 저장하시겠습니까? (y/n, 엔터 = n): ").strip().lower()
+    print(f"\n{'─' * 70}")
+    save_choice = input("  💾 입력한 쿠키를 .env 파일로 저장하시겠습니까? (y/n, 엔터 = n): ").strip().lower()
     if save_choice in ['y', 'yes']:
         save_to_env_file(cookies)
 
     # 인용글 URL 입력
-    print("\n" + "=" * 60)
-    url = input("인용글 URL: ").strip()
+    print(f"\n{'─' * 70}")
+    url = input("  🔗 인용글 URL: ").strip()
     if not url:
-        print("[오류] URL을 입력하세요")
+        print(f"  ❌ URL을 입력하세요")
         return
 
     if "/quotes" not in url:
         url = url.rstrip("/") + "/quotes"
 
-    output = input(f"저장 파일명 (엔터 = quotes.csv): ").strip() or "quotes.csv"
-    if not output.endswith(".csv"):
-        output += ".csv"
+    output = input(f"  📁 저장 파일명 (엔터 = quotes.xlsx): ").strip() or "quotes.xlsx"
+    # 확장자 자동 처리
+    if not output.endswith(".xlsx") and not output.endswith(".csv"):
+        output += ".xlsx"
 
-    max_scrolls_input = input("최대 스크롤 (엔터 = 무제한): ").strip()
+    max_scrolls_input = input(f"  🔢 최대 스크롤 (엔터 = 무제한): ").strip()
     max_scrolls = int(max_scrolls_input) if max_scrolls_input else None
 
-    headless_input = input("브라우저 숨김? (y/n, 엔터 = n): ").strip().lower()
+    headless_input = input(f"  👻 브라우저 숨김? (y/n, 엔터 = n): ").strip().lower()
     headless = headless_input in ['y', 'yes']
 
+    # 스크린샷 캡처 여부
+    screenshot_input = input(f"  📸 스크린샷 캡처? (y/n, 엔터 = y): ").strip().lower()
+    capture_screenshots = screenshot_input != 'n'
+
     # 실행
-    print("\n" + "=" * 60)
+    print(f"\n{'═' * 70}")
     driver = None
     try:
-        print("[정보] Chrome 드라이버 시작...")
+        print(f"  🚀 Chrome 드라이버 시작 중...")
         driver = make_driver(headless=headless)
 
         # 쿠키 로드
         if not load_cookies_to_driver(driver, cookies):
-            print("\n[오류] 쿠키 로드 실패")
+            print(f"\n  ❌ 쿠키 로드 실패")
             return
 
-        # 추출
-        tweets = extract_quote_tweets(driver, url, max_scrolls=max_scrolls)
+        # 추출 (스크린샷 캡처 플래그 전달)
+        tweets = extract_quote_tweets(driver, url, max_scrolls=max_scrolls, capture_screenshots=capture_screenshots)
 
-        # 저장
+        # 저장 (파일 확장자에 따라 Excel 또는 CSV로 저장)
         if tweets:
-            save_to_csv(tweets, output)
-            print("\n✅ 성공!")
+            if output.endswith('.xlsx'):
+                save_to_excel(tweets, output)
+            else:
+                save_to_csv(tweets, output)
+            print(f"{'═' * 70}")
+            print(f"  ✅ 모든 작업이 성공적으로 완료되었습니다!")
+            print(f"{'═' * 70}\n")
         else:
-            print("[경고] 추출된 데이터 없음")
+            print(f"  ⚠️  추출된 데이터 없음")
 
     except KeyboardInterrupt:
-        print("\n[정보] 중단됨")
+        print(f"\n\n  ⏹️  사용자에 의해 중단됨")
     except Exception as e:
-        print(f"\n[오류] {e}")
+        print(f"\n  ❌ 오류 발생: {e}")
     finally:
         if driver:
             driver.quit()
-            print("[정보] 브라우저 종료")
+            print(f"  🔚 브라우저 종료\n")
 
 if __name__ == "__main__":
     main()
