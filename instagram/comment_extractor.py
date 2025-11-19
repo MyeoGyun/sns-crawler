@@ -783,14 +783,35 @@ def save_to_excel(comments, output_path):
 
     # 데이터 행
     for idx, comment in enumerate(comments, start=2):
+        timestamp = comment.get("timestamp", "")
+        formatted = timestamp
+        parsed_dt = None
+        if timestamp:
+            try:
+                parsed_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).replace(
+                    tzinfo=None
+                )
+                formatted = parsed_dt.strftime("%Y-%m-%d %H:%M:%S")
+            except Exception:
+                parsed_dt = None
+                formatted = timestamp
+
         row_data = [
             comment.get("username", ""),
             comment.get("text", ""),
-            comment.get("timestamp", ""),
+            formatted,
             comment.get("likes", "0"),
             comment.get("replies", "0"),
         ]
         ws.append(row_data)
+
+        # 작성 시간 셀에 datetime 객체로 저장하면 Excel에서 형식 지정 가능
+        time_cell = ws.cell(row=idx, column=3)
+        if parsed_dt:
+            time_cell.value = parsed_dt
+            time_cell.number_format = "yyyy-mm-dd hh:mm:ss"
+        else:
+            time_cell.value = formatted
 
         # 텍스트 정렬
         for col_idx in range(1, 6):
@@ -826,10 +847,21 @@ def save_to_csv(comments, output_path):
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
         for comment in comments:
+            timestamp = comment.get("timestamp", "")
+            formatted = timestamp
+            if timestamp:
+                try:
+                    parsed_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).replace(
+                        tzinfo=None
+                    )
+                    formatted = parsed_dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    formatted = timestamp
+
             mapped_comment = {
                 "작성자": comment.get("username", ""),
                 "댓글 내용": comment.get("text", ""),
-                "작성 시간": comment.get("timestamp", ""),
+                "작성 시간": formatted,
                 "좋아요 수": comment.get("likes", "0"),
                 "대댓글 수": comment.get("replies", "0"),
             }
