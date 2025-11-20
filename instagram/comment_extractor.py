@@ -420,6 +420,11 @@ async def collect_visible_comments(page, seen_ids):
             return;
         }
 
+        // DEBUG: 첫 3개 timestamp 출력
+        if (results.length < 3) {
+            console.log('[DEBUG] timestamp:', timestamp, 'type:', typeof timestamp);
+        }
+
         let container = link.parentElement;
         let chosen = null;
         for (let i = 0; i < 25 && container; i += 1) {
@@ -1014,6 +1019,17 @@ async def extract_comments_manual(page, post_url):
     return comments
 
 
+def collect_follow_target_labels(comments):
+    """수집된 댓글에서 팔로우 체크 대상 라벨 목록 추출 (중복 제거, 순서 유지)"""
+    labels = []
+    for comment in comments:
+        follow_map = comment.get("follow_status") or {}
+        for label in follow_map.keys():
+            if label not in labels:
+                labels.append(label)
+    return labels
+
+
 # -----------------------
 # 엑셀 저장
 # -----------------------
@@ -1034,6 +1050,10 @@ def save_to_excel(comments, output_path):
     print(f"  📊 엑셀 파일 생성 중...")
     print(f"{'─' * 70}")
 
+    # 작성일 기준 정렬 (가장 과거의 글이 맨 위로) - 복사본 생성하여 원본 보존
+    sorted_comments = sorted(comments, key=lambda x: x.get('timestamp', ''), reverse=False)
+    follow_targets = collect_follow_target_labels(sorted_comments)
+
     wb = Workbook()
     ws = wb.active
     ws.title = "댓글 목록"
@@ -1041,6 +1061,7 @@ def save_to_excel(comments, output_path):
     # 헤더
     headers = ["작성자", "프로필 링크", "댓글 내용", "작성 시간", "좋아요 수", "대댓글 수",
                "게시물수", "팔로워수", "팔로잉수", "비공개계정여부"]
+    headers.extend([f"팔로우여부({label})" for label in follow_targets])
     ws.append(headers)
 
     # 헤더 스타일
@@ -1063,21 +1084,37 @@ def save_to_excel(comments, output_path):
     ws.column_dimensions['H'].width = 12  # 팔로워수
     ws.column_dimensions['I'].width = 12  # 팔로잉수
     ws.column_dimensions['J'].width = 15  # 비공개계정여부
+    if follow_targets:
+        from openpyxl.utils import get_column_letter
+        for idx, _ in enumerate(follow_targets, start=11):
+            ws.column_dimensions[get_column_letter(idx)].width = 18  # 팔로우 여부
 
     # 데이터 행
-    for idx, comment in enumerate(comments, start=2):
+    for idx, comment in enumerate(sorted_comments, start=2):
         timestamp = comment.get("timestamp", "")
         formatted = timestamp
         parsed_dt = None
         if timestamp:
             try:
+                # 먼저 ISO 형식 시도
                 parsed_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).replace(
                     tzinfo=None
                 )
                 formatted = parsed_dt.strftime("%Y-%m-%d %H:%M:%S")
             except Exception:
-                parsed_dt = None
-                formatted = timestamp
+                # ISO 형식 실패 시 Unix timestamp로 시도
+                try:
+                    # timestamp가 숫자 문자열인지 확인 (예: "45.980")
+                    timestamp_float = float(timestamp)
+                    # Unix timestamp(밀리초)를 datetime으로 변환
+                    if timestamp_float > 1000000000000:  # 밀리초 형식 (13자리)
+                        parsed_dt = datetime.fromtimestamp(timestamp_float / 1000)
+                    else:  # 초 형식
+                        parsed_dt = datetime.fromtimestamp(timestamp_float)
+                    formatted = parsed_dt.strftime("%Y-%m-%d %H:%M:%S")
+                except Exception:
+                    parsed_dt = None
+                    formatted = timestamp
 
         row_data = [
             comment.get("username", ""),
@@ -1091,6 +1128,9 @@ def save_to_excel(comments, output_path):
             comment.get("following_count", "N/A"),
             comment.get("is_private", "N/A"),
         ]
+        follow_map = comment.get("follow_status") or {}
+        for label in follow_targets:
+            row_data.append(follow_map.get(label, ""))
         ws.append(row_data)
 
         # 작성 시간 셀에 datetime 객체로 저장하면 Excel에서 형식 지정 가능
@@ -1116,7 +1156,7 @@ def save_to_excel(comments, output_path):
                 cell.value = converted
 
         # 텍스트 정렬
-        for col_idx in range(1, 11):
+        for col_idx in range(1, len(headers) + 1):
             cell = ws.cell(row=idx, column=col_idx)
             cell.alignment = Alignment(vertical="top", wrap_text=True)
 
@@ -1143,23 +1183,38 @@ def save_to_csv(comments, output_path):
         print("  ⚠️  저장할 데이터 없음")
         return
 
+    # 작성일 기준 정렬 (가장 과거의 글이 맨 위로)
+    sorted_comments = sorted(comments, key=lambda x: x.get('timestamp', ''), reverse=False)
+    follow_targets = collect_follow_target_labels(sorted_comments)
+
     fieldnames = ["작성자", "프로필 링크", "댓글 내용", "작성 시간", "좋아요 수", "대댓글 수",
                   "게시물수", "팔로워수", "팔로잉수", "비공개계정여부"]
+    fieldnames.extend([f"팔로우여부({label})" for label in follow_targets])
 
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
         writer.writeheader()
-        for comment in comments:
+        for comment in sorted_comments:
             timestamp = comment.get("timestamp", "")
             formatted = timestamp
             if timestamp:
                 try:
+                    # 먼저 ISO 형식 시도
                     parsed_dt = datetime.fromisoformat(timestamp.replace("Z", "+00:00")).replace(
                         tzinfo=None
                     )
                     formatted = parsed_dt.strftime("%Y-%m-%d %H:%M:%S")
                 except Exception:
-                    formatted = timestamp
+                    # ISO 형식 실패 시 Unix timestamp로 시도
+                    try:
+                        timestamp_float = float(timestamp)
+                        if timestamp_float > 1000000000000:  # 밀리초
+                            parsed_dt = datetime.fromtimestamp(timestamp_float / 1000)
+                        else:  # 초
+                            parsed_dt = datetime.fromtimestamp(timestamp_float)
+                        formatted = parsed_dt.strftime("%Y-%m-%d %H:%M:%S")
+                    except Exception:
+                        formatted = timestamp
 
             # 게시물수, 팔로워수, 팔로잉수를 숫자로 변환
             posts = convert_count_to_number(comment.get("posts_count", "N/A"))
@@ -1178,6 +1233,9 @@ def save_to_csv(comments, output_path):
                 "팔로잉수": following,
                 "비공개계정여부": comment.get("is_private", "N/A"),
             }
+            follow_map = comment.get("follow_status") or {}
+            for label in follow_targets:
+                mapped_comment[f"팔로우여부({label})"] = follow_map.get(label, "")
             writer.writerow(mapped_comment)
 
     print(f"\n{'─' * 70}")
@@ -1186,6 +1244,284 @@ def save_to_csv(comments, output_path):
     print(f"      📁 파일명: {output_path}")
     print(f"      📊 레코드: {len(comments)}개")
     print(f"{'─' * 70}\n")
+
+
+# -----------------------
+# 팔로우 여부 확인
+# -----------------------
+FOLLOWING_LINK_SELECTORS = [
+    "header a[href$='/following/']",
+    "header section ul li:nth-child(3) a",
+    'header a:has-text("팔로우")',
+    'header a:has-text("팔로잉")',
+    'header a:has-text("following")',
+]
+
+FOLLOW_SEARCH_INPUT_SELECTORS = [
+    'div[role="dialog"] input[placeholder="검색"]',
+    'div[role="dialog"] input[aria-label="검색"]',
+    'div[role="dialog"] input[aria-label="Search"]',
+]
+
+
+def normalize_target_username(value):
+    """@, URL 등을 제거해 Instagram 사용자명 형태로 정규화"""
+    if not value:
+        return ""
+    normalized = value.strip()
+    normalized = normalized.replace("https://www.instagram.com/", "")
+    normalized = normalized.replace("http://www.instagram.com/", "")
+    normalized = normalized.replace("https://instagram.com/", "")
+    normalized = normalized.replace("http://instagram.com/", "")
+    normalized = normalized.split("?")[0]
+    normalized = normalized.strip("/")
+    normalized = normalized.lstrip("@")
+    normalized = re.sub(r'\s+', '', normalized)
+    return normalized.strip().lower()
+
+
+def build_profile_url(profile_link, fallback_username=None):
+    """프로필 링크가 없을 경우 사용자명으로 URL 구성"""
+    base = profile_link or ""
+    if not base and fallback_username:
+        slug = normalize_target_username(fallback_username)
+        if slug:
+            base = f"https://www.instagram.com/{slug}/"
+
+    if not base:
+        return None
+
+    if base.startswith("//"):
+        base = f"https:{base}"
+    elif base.startswith("/"):
+        base = f"https://www.instagram.com{base}"
+
+    if not base.startswith("http"):
+        base = f"https://www.instagram.com/{base.lstrip('/')}"
+
+    base = base.split("?")[0]
+    if not base.endswith("/"):
+        base += "/"
+    return base
+
+
+def parse_follow_target_input(raw_input):
+    """쉼표로 구분된 팔로우 대상 문자열을 spec 리스트로 변환
+    형식 예시:
+      • roo_lab         → 검색어=라벨=매칭 텍스트 동일
+      • roo_lab|이로운 연구소  → 검색어 'roo_lab', 표시 텍스트 '이로운 연구소'
+      • roo_lab=>이로운연구소  (구분자 |, =>, :: 지원)
+    """
+    if not raw_input:
+        return []
+
+    def split_chunk(chunk):
+        for delimiter in ["|", "=>", "::"]:
+            if delimiter in chunk:
+                return chunk.split(delimiter, 1)
+        return chunk, ""
+
+    specs = []
+    seen_labels = set()
+    for chunk in raw_input.split(","):
+        raw_chunk = chunk.strip()
+        if not raw_chunk:
+            continue
+        search_part, display_part = split_chunk(raw_chunk)
+        search_term = search_part.strip()
+        display_term = display_part.strip()
+        if not search_term:
+            continue
+        label = display_term or search_term
+        label_key = label.lower()
+        if label_key in seen_labels:
+            continue
+        seen_labels.add(label_key)
+        lower_search = search_term.lower()
+        lower_display = display_term.lower() if display_term else ""
+        specs.append({
+            "label": label,
+            "search_term": search_term,
+            "normalized": normalize_target_username(search_term),
+            "raw_lower": lower_search,
+            "raw_lower_compact": re.sub(r'\s+', '', lower_search),
+            "display_lower": lower_display,
+            "display_compact": re.sub(r'\s+', '', lower_display) if display_term else "",
+        })
+    return specs
+
+
+async def open_following_modal(page):
+    """프로필 페이지에서 팔로잉 목록 모달 오픈"""
+    for selector in FOLLOWING_LINK_SELECTORS:
+        locator = page.locator(selector)
+        try:
+            if await locator.count() > 0:
+                await locator.first.click()
+                await page.wait_for_timeout(1500)
+                dialog = page.locator('div[role="dialog"]').last
+                await dialog.wait_for(timeout=5000)
+                return dialog
+        except Exception:
+            continue
+    return None
+
+
+async def wait_for_follow_search_input(page):
+    """팔로우 모달 안의 검색 입력창을 탐색"""
+    for selector in FOLLOW_SEARCH_INPUT_SELECTORS:
+        locator = page.locator(selector)
+        if await locator.count() > 0:
+            try:
+                await locator.first.wait_for(timeout=4000)
+                return locator.first
+            except Exception:
+                continue
+    return None
+
+
+async def detect_follow_targets_in_dialog(dialog, target_spec):
+    """모달 내 anchor/text를 검사하여 대상 계정 존재 여부 확인"""
+    handle = await dialog.element_handle()
+    if not handle:
+        return False
+
+    try:
+        return await handle.evaluate(
+            """(dialog, spec) => {
+                const anchors = dialog.querySelectorAll('a[href]');
+                const normalized = (spec.normalized || '').toLowerCase();
+                const fallback = (spec.raw_lower || '').toLowerCase();
+                const fallbackCompact = (spec.raw_lower_compact || '').toLowerCase();
+                const displayLower = (spec.display_lower || '').toLowerCase();
+                const displayCompact = (spec.display_compact || '').toLowerCase();
+                for (const anchor of anchors) {
+                    const href = (anchor.getAttribute('href') || '').toLowerCase();
+                    const text = (anchor.textContent || '').toLowerCase();
+                    const textCompact = text.replace(/\\s+/g, '');
+                    if (normalized && href.includes(`/${normalized}`)) {
+                        return true;
+                    }
+                    if (fallback && text.includes(fallback)) {
+                        return true;
+                    }
+                    if (fallbackCompact && textCompact.includes(fallbackCompact)) {
+                        return true;
+                    }
+                    if (displayLower && text.includes(displayLower)) {
+                        return true;
+                    }
+                    if (displayCompact && textCompact.includes(displayCompact)) {
+                        return true;
+                    }
+                }
+                return false;
+            }""",
+            target_spec
+        )
+    except Exception:
+        return False
+
+
+async def inspect_profile_following(page, profile_url, target_specs):
+    """단일 사용자 프로필에서 지정된 대상 팔로우 여부 확인"""
+    default_status = {spec["label"]: "N/A" for spec in target_specs}
+    if not profile_url:
+        return default_status
+
+    try:
+        await page.goto(profile_url)
+        await page.wait_for_timeout(random.uniform(1.2, 1.8) * 1000)
+        await page.wait_for_selector("header", timeout=15000)
+    except Exception as exc:
+        print(f"      ⚠️  프로필 로드 실패: {exc}")
+        return default_status
+
+    try:
+        dialog = await open_following_modal(page)
+        if not dialog:
+            print("      ⚠️  팔로잉 목록을 열 수 없습니다 (비공개 계정일 수 있음)")
+            return default_status
+
+        search_input = await wait_for_follow_search_input(page)
+        if not search_input:
+            print("      ⚠️  팔로우 검색창을 찾지 못했습니다")
+            return default_status
+
+        await search_input.click()
+        results = default_status.copy()
+
+        for spec in target_specs:
+            try:
+                query = spec.get("search_term") or spec["label"]
+                await search_input.fill(query)
+                await page.wait_for_timeout(random.uniform(1.0, 1.6) * 1000)
+
+                found = await detect_follow_targets_in_dialog(dialog, spec)
+                results[spec["label"]] = "O" if found else "X"
+            except Exception as exc:
+                print(f"        ⚠️  검색 실패 ({spec['label']}): {exc}")
+                results[spec["label"]] = "N/A"
+            finally:
+                await search_input.fill("")
+                await page.wait_for_timeout(400)
+
+        try:
+            await page.keyboard.press("Escape")
+        except Exception:
+            pass
+        await page.wait_for_timeout(800)
+        return results
+
+    except Exception as exc:
+        print(f"      ⚠️  팔로우 확인 실패: {exc}")
+        return default_status
+
+
+async def check_follow_status_for_comments(page, comments, target_specs):
+    """댓글 목록 기준으로 각 사용자 팔로우 여부 확인"""
+    if not target_specs:
+        return comments
+
+    profile_map = {}
+    for comment in comments:
+        username = comment.get("username", "").strip()
+        if not username or username in profile_map:
+            continue
+        profile_url = build_profile_url(comment.get("profile_link"), username)
+        if profile_url:
+            profile_map[username] = profile_url
+
+    if not profile_map:
+        print("  ⚠️  팔로우 여부를 확인할 프로필 링크를 찾을 수 없습니다")
+        return comments
+
+    total = len(profile_map)
+    print(f"\n{'═' * 70}")
+    print(f"  🔎 팔로우 여부 확인 시작 (대상 {total}명)")
+    print(f"{'═' * 70}")
+
+    results_by_user = {}
+    for idx, (username, profile_url) in enumerate(profile_map.items(), start=1):
+        print(f"  [{idx}/{total}] @{username} 검사 중...", flush=True)
+        statuses = await inspect_profile_following(page, profile_url, target_specs)
+        summary = " | ".join([f"{label}:{statuses[label]}" for label in statuses])
+        print(f"      → {summary}")
+        results_by_user[username] = statuses
+
+        if idx < total:
+            await page.wait_for_timeout(random.uniform(1.8, 3.5) * 1000)
+
+    print(f"\n  {'─' * 66}")
+    print(f"  ✅ 팔로우 여부 확인 완료")
+    print(f"  {'─' * 66}\n")
+
+    for comment in comments:
+        username = comment.get("username", "").strip()
+        if username in results_by_user:
+            comment["follow_status"] = results_by_user[username]
+
+    return comments
 
 
 # -----------------------
@@ -1391,6 +1727,17 @@ async def main():
 
                     # 프로필 정보 수집
                     comments = await enrich_comments_with_profile_data(page, comments, max_profiles)
+
+                # 팔로우 확인 옵션
+                follow_choice = input("\n  🎯 팔로우 여부를 추가로 확인하시겠습니까? (y/n, 엔터 = n): ").strip().lower()
+                if follow_choice in ['y', 'yes']:
+                    print("  💡 형식 예시: handle123, handle123|표시이름, handle123=>표시이름")
+                    target_input = input("  🔎 확인할 계정을 입력하세요 (쉼표로 구분): ").strip()
+                    target_specs = parse_follow_target_input(target_input)
+                    if target_specs:
+                        comments = await check_follow_status_for_comments(page, comments, target_specs)
+                    else:
+                        print("  ⚠️  유효한 팔로우 대상이 없어 건너뜁니다.")
 
             # 저장
             if comments:
