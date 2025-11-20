@@ -302,6 +302,57 @@ def build_comment_key(comment):
     return f"{username}|{text}|{timestamp}"
 
 
+def convert_count_to_number(count_str):
+    """
+    Instagram 숫자 표기(K, M, B)를 실제 숫자로 변환
+
+    Args:
+        count_str: '18K', '1.2M', '500', 'N/A' 등의 문자열
+
+    Returns:
+        int/float: 변환된 숫자, 또는 원본 문자열 (변환 불가 시)
+
+    Examples:
+        '18K' -> 18000
+        '1.2M' -> 1200000
+        '500' -> 500
+        'N/A' -> 'N/A'
+        '0' -> 0
+    """
+    if not count_str or count_str in ['N/A', 'n/a']:
+        return 'N/A'
+
+    count_str = str(count_str).strip().upper()
+
+    # 이미 순수 숫자인 경우
+    try:
+        return int(count_str.replace(',', ''))
+    except ValueError:
+        pass
+
+    # K, M, B 변환
+    multipliers = {
+        'K': 1_000,
+        'M': 1_000_000,
+        'B': 1_000_000_000,
+    }
+
+    for suffix, multiplier in multipliers.items():
+        if suffix in count_str:
+            try:
+                # '18K', '1.2M' 등에서 숫자 부분 추출
+                number_part = count_str.replace(suffix, '').replace(',', '').strip()
+                number = float(number_part)
+                result = number * multiplier
+                # 정수로 변환 가능하면 정수로
+                return int(result) if result == int(result) else result
+            except ValueError:
+                pass
+
+    # 변환 실패 시 원본 반환
+    return count_str
+
+
 async def click_first_available(page, selectors):
     """셀렉터 목록 중 클릭 가능한 첫 요소 클릭"""
     for selector in selectors:
@@ -1050,6 +1101,20 @@ def save_to_excel(comments, output_path):
         else:
             time_cell.value = formatted
 
+        # 게시물수, 팔로워수, 팔로잉수를 숫자로 변환하여 셀에 적용
+        for col_idx, field in [(7, 'posts_count'), (8, 'followers_count'), (9, 'following_count')]:
+            cell = ws.cell(row=idx, column=col_idx)
+            value = comment.get(field, 'N/A')
+            converted = convert_count_to_number(value)
+
+            if isinstance(converted, (int, float)):
+                # 숫자로 변환 성공 - Excel 숫자 타입으로 저장
+                cell.value = converted
+                cell.number_format = '#,##0'  # 천단위 구분 포맷
+            else:
+                # 'N/A' 등 - 문자열로 유지
+                cell.value = converted
+
         # 텍스트 정렬
         for col_idx in range(1, 11):
             cell = ws.cell(row=idx, column=col_idx)
@@ -1096,6 +1161,11 @@ def save_to_csv(comments, output_path):
                 except Exception:
                     formatted = timestamp
 
+            # 게시물수, 팔로워수, 팔로잉수를 숫자로 변환
+            posts = convert_count_to_number(comment.get("posts_count", "N/A"))
+            followers = convert_count_to_number(comment.get("followers_count", "N/A"))
+            following = convert_count_to_number(comment.get("following_count", "N/A"))
+
             mapped_comment = {
                 "작성자": comment.get("username", ""),
                 "프로필 링크": comment.get("profile_link", ""),
@@ -1103,9 +1173,9 @@ def save_to_csv(comments, output_path):
                 "작성 시간": formatted,
                 "좋아요 수": comment.get("likes", "0"),
                 "대댓글 수": comment.get("replies", "0"),
-                "게시물수": comment.get("posts_count", "N/A"),
-                "팔로워수": comment.get("followers_count", "N/A"),
-                "팔로잉수": comment.get("following_count", "N/A"),
+                "게시물수": posts,
+                "팔로워수": followers,
+                "팔로잉수": following,
                 "비공개계정여부": comment.get("is_private", "N/A"),
             }
             writer.writerow(mapped_comment)
