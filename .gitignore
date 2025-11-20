@@ -38,8 +38,12 @@ Thumbs.db
 
 # Project specific
 captures/
+screenshots/
 *.csv
 config.json
+
+# Documentation and notes
+*.md
 
 # Session and Cookies (SECURITY - DO NOT COMMIT!)
 .env
