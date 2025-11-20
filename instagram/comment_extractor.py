@@ -495,6 +495,9 @@ async def collect_visible_comments(page, seen_ids):
         comment["likes"] = (comment.get("likes") or "0").strip() or "0"
         comment["replies"] = (comment.get("replies") or "0").strip() or "0"
 
+        # 프로필 링크 생성
+        comment["profile_link"] = f"https://www.instagram.com/{comment['username']}/" if comment["username"] else ""
+
         comment_id = build_comment_key(comment)
         if not comment_id or comment_id in seen_ids:
             continue
@@ -503,6 +506,229 @@ async def collect_visible_comments(page, seen_ids):
         harvested.append(comment)
 
     return harvested
+
+
+# -----------------------
+# 프로필 메트릭 수집
+# -----------------------
+async def collect_user_profile_metrics(page, username, retry_count=3):
+    """
+    사용자 프로필 메트릭 수집: 게시물수, 팔로워수, 팔로잉수, 비공개계정여부
+
+    Args:
+        page: Playwright page object
+        username: Instagram username
+        retry_count: Number of retries on failure
+
+    Returns:
+        dict: {
+            'posts_count': str,
+            'followers_count': str,
+            'following_count': str,
+            'is_private': str ('O' or 'X'),
+            'success': bool,
+            'error': str
+        }
+    """
+    result = {
+        'posts_count': '0',
+        'followers_count': '0',
+        'following_count': '0',
+        'is_private': 'X',
+        'success': False,
+        'error': ''
+    }
+
+    if not username:
+        result['error'] = 'Empty username'
+        return result
+
+    profile_url = f"https://www.instagram.com/{username}/"
+
+    for attempt in range(retry_count):
+        try:
+            # Navigate to profile
+            await page.goto(profile_url, wait_until='domcontentloaded', timeout=30000)
+            await page.wait_for_timeout(random.uniform(2.0, 4.0) * 1000)
+
+            # Method 1: Try meta description (most reliable)
+            try:
+                meta_desc = await page.locator('meta[name="description"]').get_attribute('content')
+                if meta_desc:
+                    import re
+
+                    # DEBUG: Print meta description
+                    print(f"\n      [DEBUG] Meta description: {meta_desc[:200]}...")
+
+                    # Extract numbers before keywords (English)
+                    followers_match = re.search(r'([\d,\.KMB]+)\s*Followers', meta_desc, re.IGNORECASE)
+                    following_match = re.search(r'([\d,\.KMB]+)\s*Following', meta_desc, re.IGNORECASE)
+                    posts_match = re.search(r'([\d,\.KMB]+)\s*Posts', meta_desc, re.IGNORECASE)
+
+                    # Also check Korean
+                    if not followers_match:
+                        followers_match = re.search(r'팔로워\s*([\d,\.KMB만천백십억]+)명?', meta_desc)
+                    if not following_match:
+                        following_match = re.search(r'팔로잉?\s*([\d,\.KMB만천백십억]+)명?', meta_desc)
+                    if not posts_match:
+                        posts_match = re.search(r'게시물\s*([\d,\.KMB만천백십억]+)개?', meta_desc)
+
+                    # DEBUG: Print matches
+                    print(f"      [DEBUG] Posts match: {posts_match.group(1) if posts_match else 'None'}")
+                    print(f"      [DEBUG] Followers match: {followers_match.group(1) if followers_match else 'None'}")
+                    print(f"      [DEBUG] Following match: {following_match.group(1) if following_match else 'None'}")
+
+                    if followers_match:
+                        result['followers_count'] = followers_match.group(1).replace(',', '').replace('.', '')
+                    if following_match:
+                        result['following_count'] = following_match.group(1).replace(',', '').replace('.', '')
+                    if posts_match:
+                        result['posts_count'] = posts_match.group(1).replace(',', '').replace('.', '')
+            except Exception as e:
+                print(f"      [DEBUG] Meta parsing error: {e}")
+                pass  # Silently fail and try next method
+
+            # Method 2: Try direct DOM selectors (backup)
+            if result['followers_count'] == '0':
+                try:
+                    # Look for stat containers - common Instagram pattern
+                    stats = await page.locator('header section ul li').all()
+                    print(f"      [DEBUG] DOM stats found: {len(stats)} elements")
+
+                    if len(stats) >= 3:
+                        # Usually: posts, followers, following (in that order)
+                        posts_text = await stats[0].locator('span').first.inner_text()
+                        followers_text = await stats[1].locator('span').first.inner_text()
+                        following_text = await stats[2].locator('span').first.inner_text()
+
+                        # DEBUG: Print raw text
+                        print(f"      [DEBUG] DOM stats[0] (posts): '{posts_text}'")
+                        print(f"      [DEBUG] DOM stats[1] (followers): '{followers_text}'")
+                        print(f"      [DEBUG] DOM stats[2] (following): '{following_text}'")
+
+                        # Clean numbers (remove commas, spaces)
+                        import re
+                        result['posts_count'] = re.sub(r'[^0-9KMB]', '', posts_text)
+                        result['followers_count'] = re.sub(r'[^0-9KMB]', '', followers_text)
+                        result['following_count'] = re.sub(r'[^0-9KMB]', '', following_text)
+                except Exception as e:
+                    print(f"      [DEBUG] DOM parsing error: {e}")
+                    pass  # Silently fail
+
+            # Check if private account
+            try:
+                is_private_en = await page.locator('h2:has-text("This Account is Private")').count()
+                is_private_ko = await page.locator('h2:has-text("비공개 계정")').count()
+                result['is_private'] = 'O' if (is_private_en > 0 or is_private_ko > 0) else 'X'
+            except:
+                result['is_private'] = 'X'
+
+            # Mark success if we got at least one metric
+            if (result['followers_count'] != '0' or
+                result['posts_count'] != '0' or
+                result['following_count'] != '0'):
+                result['success'] = True
+                # DEBUG: Final result
+                print(f"      [DEBUG] Final result - Posts: {result['posts_count']}, Followers: {result['followers_count']}, Following: {result['following_count']}")
+                return result
+
+            # If failed, wait before retry
+            if attempt < retry_count - 1:
+                await page.wait_for_timeout(random.uniform(3.0, 5.0) * 1000)
+
+        except Exception as e:
+            result['error'] = str(e)
+            if attempt < retry_count - 1:
+                await page.wait_for_timeout(random.uniform(5.0, 8.0) * 1000)
+
+    return result
+
+
+async def enrich_comments_with_profile_data(page, comments, max_profiles=None):
+    """
+    댓글 데이터에 사용자 프로필 메트릭 추가
+
+    Args:
+        page: Playwright page
+        comments: List of comment dicts
+        max_profiles: Maximum number of profiles to scrape (None = all)
+
+    Returns:
+        List of enriched comments
+    """
+    print(f"\n{'═' * 70}")
+    print(f"  👤 사용자 프로필 정보 수집 시작")
+    print(f"{'═' * 70}")
+
+    # Get unique usernames
+    unique_users = {}
+    for comment in comments:
+        username = comment.get('username', '').strip()
+        if username and username not in unique_users:
+            unique_users[username] = None
+
+    total_users = len(unique_users)
+    if max_profiles:
+        total_users = min(total_users, max_profiles)
+
+    print(f"\n  📊 총 {total_users}명의 프로필 정보 수집 예정")
+    print(f"  ⏱️  예상 소요 시간: {total_users * 4 / 60:.1f}분 (프로필당 ~4초)")
+    print(f"\n  {'─' * 66}\n")
+
+    processed = 0
+    failed = 0
+
+    usernames_to_process = list(unique_users.keys())[:max_profiles] if max_profiles else list(unique_users.keys())
+
+    for username in usernames_to_process:
+        processed += 1
+
+        print(f"  [{processed}/{total_users}] @{username} 수집 중...", end=" ", flush=True)
+
+        metrics = await collect_user_profile_metrics(page, username)
+
+        if metrics['success']:
+            unique_users[username] = metrics
+            print(f"✓ 팔로워: {metrics['followers_count']:>6s} | "
+                  f"팔로잉: {metrics['following_count']:>6s} | "
+                  f"게시물: {metrics['posts_count']:>6s} | "
+                  f"비공개: {metrics['is_private']}")
+        else:
+            failed += 1
+            unique_users[username] = metrics  # Keep failed result
+            print(f"✗ 실패: {metrics.get('error', 'Unknown error')[:40]}")
+
+        # Rate limiting: wait between requests
+        if processed < total_users:
+            wait_time = random.uniform(2.5, 4.5)
+            await page.wait_for_timeout(wait_time * 1000)
+
+    print(f"\n  {'─' * 66}")
+    print(f"  ✅ 프로필 수집 완료: 성공 {processed - failed}/{total_users}, 실패 {failed}")
+    print(f"  {'─' * 66}\n")
+
+    # Merge metrics into comments
+    for comment in comments:
+        username = comment.get('username', '').strip()
+        if username in unique_users and unique_users[username]:
+            metrics = unique_users[username]
+            if metrics['success']:
+                comment['posts_count'] = metrics['posts_count']
+                comment['followers_count'] = metrics['followers_count']
+                comment['following_count'] = metrics['following_count']
+                comment['is_private'] = metrics['is_private']
+            else:
+                comment['posts_count'] = 'N/A'
+                comment['followers_count'] = 'N/A'
+                comment['following_count'] = 'N/A'
+                comment['is_private'] = 'N/A'
+        else:
+            comment['posts_count'] = 'N/A'
+            comment['followers_count'] = 'N/A'
+            comment['following_count'] = 'N/A'
+            comment['is_private'] = 'N/A'
+
+    return comments
 
 
 # -----------------------
@@ -762,7 +988,8 @@ def save_to_excel(comments, output_path):
     ws.title = "댓글 목록"
 
     # 헤더
-    headers = ["작성자", "댓글 내용", "작성 시간", "좋아요 수", "대댓글 수"]
+    headers = ["작성자", "프로필 링크", "댓글 내용", "작성 시간", "좋아요 수", "대댓글 수",
+               "게시물수", "팔로워수", "팔로잉수", "비공개계정여부"]
     ws.append(headers)
 
     # 헤더 스타일
@@ -776,10 +1003,15 @@ def save_to_excel(comments, output_path):
 
     # 열 너비
     ws.column_dimensions['A'].width = 20  # 작성자
-    ws.column_dimensions['B'].width = 60  # 댓글 내용
-    ws.column_dimensions['C'].width = 20  # 작성 시간
-    ws.column_dimensions['D'].width = 12  # 좋아요 수
-    ws.column_dimensions['E'].width = 12  # 대댓글 수
+    ws.column_dimensions['B'].width = 50  # 프로필 링크
+    ws.column_dimensions['C'].width = 60  # 댓글 내용
+    ws.column_dimensions['D'].width = 20  # 작성 시간
+    ws.column_dimensions['E'].width = 12  # 좋아요 수
+    ws.column_dimensions['F'].width = 12  # 대댓글 수
+    ws.column_dimensions['G'].width = 12  # 게시물수
+    ws.column_dimensions['H'].width = 12  # 팔로워수
+    ws.column_dimensions['I'].width = 12  # 팔로잉수
+    ws.column_dimensions['J'].width = 15  # 비공개계정여부
 
     # 데이터 행
     for idx, comment in enumerate(comments, start=2):
@@ -798,15 +1030,20 @@ def save_to_excel(comments, output_path):
 
         row_data = [
             comment.get("username", ""),
+            comment.get("profile_link", ""),
             comment.get("text", ""),
             formatted,
             comment.get("likes", "0"),
             comment.get("replies", "0"),
+            comment.get("posts_count", "N/A"),
+            comment.get("followers_count", "N/A"),
+            comment.get("following_count", "N/A"),
+            comment.get("is_private", "N/A"),
         ]
         ws.append(row_data)
 
         # 작성 시간 셀에 datetime 객체로 저장하면 Excel에서 형식 지정 가능
-        time_cell = ws.cell(row=idx, column=3)
+        time_cell = ws.cell(row=idx, column=4)
         if parsed_dt:
             time_cell.value = parsed_dt
             time_cell.number_format = "yyyy-mm-dd hh:mm:ss"
@@ -814,7 +1051,7 @@ def save_to_excel(comments, output_path):
             time_cell.value = formatted
 
         # 텍스트 정렬
-        for col_idx in range(1, 6):
+        for col_idx in range(1, 11):
             cell = ws.cell(row=idx, column=col_idx)
             cell.alignment = Alignment(vertical="top", wrap_text=True)
 
@@ -841,7 +1078,8 @@ def save_to_csv(comments, output_path):
         print("  ⚠️  저장할 데이터 없음")
         return
 
-    fieldnames = ["작성자", "댓글 내용", "작성 시간", "좋아요 수", "대댓글 수"]
+    fieldnames = ["작성자", "프로필 링크", "댓글 내용", "작성 시간", "좋아요 수", "대댓글 수",
+                  "게시물수", "팔로워수", "팔로잉수", "비공개계정여부"]
 
     with open(output_path, "w", newline="", encoding="utf-8-sig") as f:
         writer = csv.DictWriter(f, fieldnames=fieldnames)
@@ -860,10 +1098,15 @@ def save_to_csv(comments, output_path):
 
             mapped_comment = {
                 "작성자": comment.get("username", ""),
+                "프로필 링크": comment.get("profile_link", ""),
                 "댓글 내용": comment.get("text", ""),
                 "작성 시간": formatted,
                 "좋아요 수": comment.get("likes", "0"),
                 "대댓글 수": comment.get("replies", "0"),
+                "게시물수": comment.get("posts_count", "N/A"),
+                "팔로워수": comment.get("followers_count", "N/A"),
+                "팔로잉수": comment.get("following_count", "N/A"),
+                "비공개계정여부": comment.get("is_private", "N/A"),
             }
             writer.writerow(mapped_comment)
 
@@ -1052,6 +1295,33 @@ async def main():
             else:
                 comments = await extract_comments_auto(page, url, max_scrolls)
 
+            # 프로필 정보 수집 여부 확인
+            if comments:
+                unique_usernames = len(set(c.get('username', '') for c in comments if c.get('username')))
+
+                print(f"\n{'─' * 70}")
+                print(f"  👤 사용자 프로필 정보 수집 (선택사항)")
+                print(f"  {'─' * 66}")
+                print(f"      • 수집 가능한 정보: 게시물수, 팔로워수, 팔로잉수, 비공개계정여부")
+                print(f"      • 대상 사용자: {unique_usernames}명 (중복 제거)")
+                print(f"      • 예상 소요 시간: {unique_usernames * 4 / 60:.1f}분")
+                print(f"  {'─' * 66}")
+                print(f"\n  ⚠️  주의사항:")
+                print(f"      • Instagram 서비스 약관 위반 가능성이 있습니다")
+                print(f"      • 과도한 수집은 계정 정지로 이어질 수 있습니다")
+                print(f"      • 중요한 계정 사용을 권장하지 않습니다")
+                print(f"  {'─' * 66}\n")
+
+                enrich_choice = input("  프로필 정보를 수집하시겠습니까? (y/n, 엔터 = n): ").strip().lower()
+
+                if enrich_choice in ['y', 'yes']:
+                    # 최대 수집 프로필 수 제한 옵션
+                    max_profiles_input = input(f"  🔢 최대 프로필 수집 수 (엔터 = 전체 {unique_usernames}명): ").strip()
+                    max_profiles = int(max_profiles_input) if max_profiles_input else None
+
+                    # 프로필 정보 수집
+                    comments = await enrich_comments_with_profile_data(page, comments, max_profiles)
+
             # 저장
             if comments:
                 if output.endswith('.xlsx'):
@@ -1062,8 +1332,8 @@ async def main():
                 print(f"  ✅ 모든 작업이 성공적으로 완료되었습니다!")
                 print(f"{'═' * 70}\n")
             else:
-                print(f"  ⚠️  추출된 데이터 없음 (DOM 구조 분석 단계)")
-                print(f"  💡 위의 DOM 분석 결과를 참고하여 추출 로직을 구현해야 합니다")
+                print(f"  ⚠️  추출된 데이터 없음")
+                print(f"  💡 댓글이 없거나 DOM 구조 분석이 필요합니다")
 
         except KeyboardInterrupt:
             print(f"\n\n  ⏹️  사용자에 의해 중단됨")
